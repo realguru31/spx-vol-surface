@@ -36,6 +36,7 @@ DARK_CSS = """
 
     .stApp { background-color: #0a0e27; }
     header[data-testid="stHeader"] { background-color: #0a0e27; }
+    [data-testid="stToolbar"] { display: none; }
     .block-container { padding-top: 1rem; }
 
     h1, h2, h3, h4 { color: #e0e6ff; font-family: 'Outfit', sans-serif; }
