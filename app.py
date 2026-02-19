@@ -193,13 +193,13 @@ def ensure_data():
 # Chart Builders
 # ─────────────────────────────────────
 
-def create_vol_surface_table(current, prior, strike_step=50):
+def create_vol_surface_table(current, prior, strike_step=50, pct_range=12):
     """
     Build the main vol surface table with changes.
     Returns: surface_df, changes_df, spot
     """
-    surf_now, spot = build_vol_surface(current, strike_step=strike_step)
-    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step)
+    surf_now, spot = build_vol_surface(current, strike_step=strike_step, pct_range=pct_range/100)
+    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
 
     if surf_now.empty:
         return pd.DataFrame(), pd.DataFrame(), 0
@@ -595,16 +595,16 @@ st.markdown(f"""
 # ── Controls ──
 ctrl_cols = st.columns([1, 1, 1, 3])
 with ctrl_cols[0]:
-    strike_step = st.selectbox("Strike Step", [25, 50, 100], index=1, key="sstep")
+    strike_step = st.selectbox("Strike Step", [5, 10, 25, 50, 100], index=2, key="sstep")
 with ctrl_cols[1]:
-    pct_range = st.selectbox("Range %", [8, 10, 12, 15], index=2, key="pctrange")
+    pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=5, key="pctrange")
 with ctrl_cols[2]:
     if st.button("🔄 Refresh", use_container_width=True):
         load_live_snapshot.clear()
         st.rerun()
 
 # ── Build data ──
-surface_df, changes_df, _ = create_vol_surface_table(current, prior, strike_step=strike_step)
+surface_df, changes_df, _ = create_vol_surface_table(current, prior, strike_step=strike_step, pct_range=pct_range)
 
 # ── Row 1: Vol Surface + Changes Heatmaps ──
 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
