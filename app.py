@@ -257,8 +257,7 @@ def create_surface_heatmap(surface_df, changes_df, spot):
             [1.0, '#ff6d00'],
         ],
         colorbar=dict(
-            title='IV %',
-            titlefont=dict(color=CS['text'], size=10),
+            title=dict(text='IV %', font=dict(color=CS['text'], size=10)),
             tickfont=dict(color=CS['text'], size=9),
         ),
         hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{text}%<extra></extra>',
@@ -326,8 +325,7 @@ def create_changes_heatmap(changes_df, spot):
         ],
         zmid=0,
         colorbar=dict(
-            title='Δ IV',
-            titlefont=dict(color=CS['text'], size=10),
+            title=dict(text='Δ IV', font=dict(color=CS['text'], size=10)),
             tickfont=dict(color=CS['text'], size=9),
             ticksuffix='%',
         ),
@@ -667,14 +665,14 @@ with st.expander("📊 Raw Vol Surface Data"):
     if not surface_df.empty:
         display = surface_df.copy()
         display.index = [f"${s:,.0f}" for s in display.index]
-        display = display.applymap(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
+        display = display.map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
         st.dataframe(display, use_container_width=True, height=400)
 
 with st.expander("📊 Vol Changes Data"):
     if not changes_df.empty:
         display = changes_df.copy()
         display.index = [f"${s:,.0f}" for s in display.index]
-        display = display.applymap(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "")
+        display = display.map(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "")
         st.dataframe(display, use_container_width=True, height=400)
 
 # ── Footer ──
