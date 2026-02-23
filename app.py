@@ -749,6 +749,13 @@ if current is None:
     st.error("❌ Failed to fetch data. Check your network and try again.")
     st.stop()
 
+# ── Diagnostic: print snapshot structure ──
+cur_exps = list(current.get('expiries', {}).keys())
+prior_exps = list(prior.get('expiries', {}).keys()) if prior else []
+print(f"[DIAG] current date={current.get('date')}, spot={current.get('spot')}, expiries={cur_exps}")
+print(f"[DIAG] prior date={prior.get('date') if prior else 'None'}, spot={prior.get('spot') if prior else 'None'}, expiries={prior_exps}")
+print(f"[DIAG] expiry overlap={[e for e in cur_exps if e in prior_exps]}")
+
 # ── tvdatafeed connection (cached across reruns) ──
 @st.cache_resource(show_spinner=False)
 def _get_cached_tv():
