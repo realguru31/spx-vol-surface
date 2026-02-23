@@ -15,6 +15,7 @@ from fetch_data import (
     fetch_full_snapshot, save_snapshot, load_snapshot,
     list_snapshots, get_prior_snapshot, generate_synthetic_prior,
     build_vol_surface, build_term_structure, build_skew,
+    get_tv_connection, fetch_price_data, fetch_tv_spot, compute_iv_changes,
 )
 
 # ─────────────────────────────────────
@@ -245,11 +246,11 @@ def create_surface_heatmap(surface_df, changes_df, spot):
 
     fig = go.Figure(data=go.Heatmap(
         z=vol_z,
-        x=[e[5:] for e in expiries],  # MM-DD format
+        x=[datetime.strptime(e, '%Y-%m-%d').strftime('%b %d') for e in expiries],  # MM-DD format
         y=[f"{s:.0f}" for s in strikes],
         text=vol_text,
-        texttemplate="%{text}",
-        textfont=dict(size=9, color='white'),
+        texttemplate="%{text}" if len(strikes) <= 40 else "",
+        textfont=dict(size=9 if len(strikes) <= 30 else 7, color='white'),
         colorscale=[
             [0, '#1a237e'],
             [0.3, '#283593'],
@@ -278,7 +279,7 @@ def create_surface_heatmap(surface_df, changes_df, spot):
         paper_bgcolor=CS['bg'],
         plot_bgcolor=CS['plot_bg'],
         font=dict(color=CS['text'], size=10, family='JetBrains Mono'),
-        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9)),
+        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9), type='category'),
         yaxis=dict(title='Strike', gridcolor=CS['grid'], tickfont=dict(size=9)),
         margin=dict(l=60, r=20, t=40, b=40),
         height=500,
@@ -312,11 +313,11 @@ def create_changes_heatmap(changes_df, spot):
 
     fig = go.Figure(data=go.Heatmap(
         z=z_vals,
-        x=[e[5:] for e in expiries],
+        x=[datetime.strptime(e, '%Y-%m-%d').strftime('%b %d') for e in expiries],
         y=[f"{s:.0f}" for s in strikes],
         text=text_vals,
-        texttemplate="%{text}",
-        textfont=dict(size=9),
+        texttemplate="%{text}" if len(strikes) <= 40 else "",
+        textfont=dict(size=9 if len(strikes) <= 30 else 7),
         colorscale=[
             [0, '#b71c1c'],
             [0.35, '#e53935'],
@@ -346,7 +347,7 @@ def create_changes_heatmap(changes_df, spot):
         paper_bgcolor=CS['bg'],
         plot_bgcolor=CS['plot_bg'],
         font=dict(color=CS['text'], size=10, family='JetBrains Mono'),
-        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9)),
+        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9), type='category'),
         yaxis=dict(title='Strike', gridcolor=CS['grid'], tickfont=dict(size=9)),
         margin=dict(l=60, r=20, t=40, b=40),
         height=500,
@@ -550,6 +551,134 @@ def create_term_structure(current, prior):
     return fig
 
 
+def create_combined_price_iv_chart(price_df, iv_changes_df, spot):
+    """
+    Combined chart: candles (left ~80%) + IV change bars (right ~20%).
+    Shared Y-axis = price/strike.
+    Candles: dodger blue up, magenta down.
+    IV bars: green = IV increase, red = IV decrease.
+    """
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.8, 0.2],
+        shared_yaxes=True,
+        horizontal_spacing=0.01,
+    )
+
+    # ── Candles ──
+    if not price_df.empty:
+        time_labels = [t.strftime('%H:%M') for t in price_df.index]
+
+        fig.add_trace(go.Candlestick(
+            x=time_labels,
+            open=price_df['Open'], high=price_df['High'],
+            low=price_df['Low'], close=price_df['Close'],
+            increasing=dict(line=dict(color='dodgerblue'), fillcolor='dodgerblue'),
+            decreasing=dict(line=dict(color='magenta'), fillcolor='magenta'),
+            name='SPX',
+            showlegend=False,
+        ), row=1, col=1)
+
+        # Full 7hr timeline for x-axis (padding right side)
+        full_labels = []
+        for h in range(9, 17):
+            for m in range(0, 60, 5):
+                if h == 9 and m < 30:
+                    continue
+                if h == 16 and m > 0:
+                    break
+                full_labels.append(f"{h:02d}:{m:02d}")
+
+        # Spot line
+        if spot:
+            fig.add_hline(
+                y=spot, line=dict(color=CS['cyan'], width=1, dash='dot'),
+                annotation_text=f"${spot:,.0f}",
+                annotation_font=dict(color=CS['cyan'], size=9),
+                annotation_position='left',
+                row=1, col=1,
+            )
+    else:
+        full_labels = []
+        fig.add_annotation(
+            text="No price data (tvdatafeed unavailable)",
+            xref="paper", yref="paper", x=0.3, y=0.5,
+            showarrow=False, font=dict(color=CS['text'], size=13),
+        )
+
+    # ── IV Change Bars ──
+    if not iv_changes_df.empty:
+        strikes = iv_changes_df['strike'].values
+        changes = iv_changes_df['iv_change'].values
+        colors = [CS['green'] if v >= 0 else CS['red'] for v in changes]
+
+        fig.add_trace(go.Bar(
+            x=changes,
+            y=strikes,
+            orientation='h',
+            marker_color=colors,
+            opacity=0.8,
+            name='Δ IV',
+            showlegend=False,
+            hovertemplate='Strike: $%{y:,.0f}<br>Δ IV: %{x:+.2f}%<extra></extra>',
+        ), row=1, col=2)
+
+    # ── Layout ──
+    # Y-axis range: use price data range with some padding
+    if not price_df.empty:
+        y_min = min(price_df['Low'].min(), iv_changes_df['strike'].min() if not iv_changes_df.empty else price_df['Low'].min())
+        y_max = max(price_df['High'].max(), iv_changes_df['strike'].max() if not iv_changes_df.empty else price_df['High'].max())
+        y_pad = (y_max - y_min) * 0.05
+    elif not iv_changes_df.empty:
+        y_min = iv_changes_df['strike'].min()
+        y_max = iv_changes_df['strike'].max()
+        y_pad = (y_max - y_min) * 0.05
+    else:
+        y_min, y_max, y_pad = 6800, 7000, 10
+
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor=CS['bg'],
+        plot_bgcolor=CS['plot_bg'],
+        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
+        height=500,
+        margin=dict(l=60, r=20, t=10, b=40),
+        showlegend=False,
+        yaxis=dict(
+            range=[y_min - y_pad, y_max + y_pad],
+            gridcolor=CS['grid'],
+            tickformat='$,.0f',
+            title='',
+        ),
+        # Candle x-axis
+        xaxis=dict(
+            gridcolor=CS['grid'],
+            categoryorder='array',
+            categoryarray=full_labels if full_labels else None,
+            range=[-0.5, len(full_labels) - 0.5] if full_labels else None,
+            rangeslider_visible=False,
+            title='Time (ET)',
+            tickfont=dict(size=8),
+            nticks=14,
+        ),
+        # IV bars x-axis
+        xaxis2=dict(
+            gridcolor=CS['grid'],
+            zeroline=True,
+            zerolinecolor=CS['text'],
+            zerolinewidth=0.5,
+            title='Δ IV %',
+            tickfont=dict(size=8),
+        ),
+        yaxis2=dict(
+            gridcolor=CS['grid'],
+            showticklabels=False,
+        ),
+    )
+
+    return fig
+
+
 # ─────────────────────────────────────
 # MAIN APP
 # ─────────────────────────────────────
@@ -560,7 +689,13 @@ if current is None:
     st.error("❌ Failed to fetch data. Check your network and try again.")
     st.stop()
 
-spot = current['spot']
+# ── tvdatafeed connection ──
+tv_secrets = dict(st.secrets) if hasattr(st, 'secrets') else {}
+tv = get_tv_connection(tv_secrets)
+
+# ── Spot price from tvdatafeed (live) with fallback to snapshot ──
+tv_spot = fetch_tv_spot(tv, tv_secrets)
+spot = tv_spot if tv_spot else current['spot']
 prior_spot = prior['spot'] if prior else spot
 spot_change_pct = (spot / prior_spot - 1) * 100 if prior_spot else 0
 
@@ -593,15 +728,28 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ── Controls ──
-ctrl_cols = st.columns([1, 1, 1, 3])
+ctrl_cols = st.columns([1, 1, 1, 1, 2])
 with ctrl_cols[0]:
     strike_step = st.selectbox("Strike Step", [5, 10, 25, 50, 100], index=2, key="sstep")
 with ctrl_cols[1]:
     pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=5, key="pctrange")
 with ctrl_cols[2]:
-    if st.button("🔄 Refresh", use_container_width=True):
+    dte_mode = st.selectbox("DTE", [0, 1, 3, 7, 14, 30], format_func=lambda x: "0DTE" if x == 0 else f"{x}d", index=0, key="dtemode")
+with ctrl_cols[3]:
+    if st.button("🔄 Refresh", width="stretch"):
         load_live_snapshot.clear()
         st.rerun()
+
+# ── Combined Price + IV Chart (top of page, full width) ──
+st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+st.markdown('<div class="chart-title">SPX PRICE &amp; IV CHANGES</div>', unsafe_allow_html=True)
+
+price_df = fetch_price_data(tv, n_bars=84, secrets=tv_secrets)
+iv_changes = compute_iv_changes(current, prior, max_dte=dte_mode, strike_step=strike_step, pct_range=pct_range/100)
+fig_combined = create_combined_price_iv_chart(price_df, iv_changes, spot)
+st.plotly_chart(fig_combined, width="stretch", theme=None)
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Build data ──
 surface_df, changes_df, _ = create_vol_surface_table(current, prior, strike_step=strike_step, pct_range=pct_range)
@@ -613,12 +761,12 @@ row1_l, row1_r = st.columns(2)
 with row1_l:
     st.markdown('<div class="chart-title">VOL SURFACE</div>', unsafe_allow_html=True)
     fig_surface = create_surface_heatmap(surface_df, changes_df, spot)
-    st.plotly_chart(fig_surface, use_container_width=True, theme=None)
+    st.plotly_chart(fig_surface, width="stretch", theme=None)
 
 with row1_r:
     st.markdown('<div class="chart-title">VOL CHANGES</div>', unsafe_allow_html=True)
     fig_changes = create_changes_heatmap(changes_df, spot)
-    st.plotly_chart(fig_changes, use_container_width=True, theme=None)
+    st.plotly_chart(fig_changes, width="stretch", theme=None)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -628,7 +776,7 @@ row2_l, row2_r = st.columns(2)
 
 with row2_l:
     fig_3d = create_3d_surface(surface_df, spot)
-    st.plotly_chart(fig_3d, use_container_width=True, theme=None)
+    st.plotly_chart(fig_3d, width="stretch", theme=None)
 
 with row2_r:
     # Expiry selector for fixed-strike changes
@@ -643,7 +791,7 @@ with row2_r:
         fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx)
     else:
         fig_fsc = go.Figure()
-    st.plotly_chart(fig_fsc, use_container_width=True, theme=None)
+    st.plotly_chart(fig_fsc, width="stretch", theme=None)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -653,11 +801,11 @@ row3_l, row3_r = st.columns(2)
 
 with row3_l:
     fig_skew = create_skew_chart(current, prior, expiry_idx=0)
-    st.plotly_chart(fig_skew, use_container_width=True, theme=None)
+    st.plotly_chart(fig_skew, width="stretch", theme=None)
 
 with row3_r:
     fig_term = create_term_structure(current, prior)
-    st.plotly_chart(fig_term, use_container_width=True, theme=None)
+    st.plotly_chart(fig_term, width="stretch", theme=None)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -667,14 +815,14 @@ with st.expander("📊 Raw Vol Surface Data"):
         display = surface_df.copy()
         display.index = [f"${s:,.0f}" for s in display.index]
         display = display.map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
-        st.dataframe(display, use_container_width=True, height=400)
+        st.dataframe(display, width="stretch", height=400)
 
 with st.expander("📊 Vol Changes Data"):
     if not changes_df.empty:
         display = changes_df.copy()
         display.index = [f"${s:,.0f}" for s in display.index]
         display = display.map(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "")
-        st.dataframe(display, use_container_width=True, height=400)
+        st.dataframe(display, width="stretch", height=400)
 
 # ── Footer ──
 snapshot_dates = list_snapshots()
