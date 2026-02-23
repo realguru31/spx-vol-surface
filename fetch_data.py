@@ -347,11 +347,12 @@ def build_skew(snapshot, expiry_idx=0, pct_range=0.10):
 def get_tv_connection(secrets=None):
     """Get tvDatafeed connection. Uses st.secrets if available."""
     try:
-        from tvDatafeed import TvDatafeed, Interval
-        if secrets and 'tv_username' in secrets and 'tv_password' in secrets:
+        from tvDatafeed import TvDatafeed
+        if secrets and secrets.get('tv_username') and secrets.get('tv_password'):
             return TvDatafeed(username=secrets['tv_username'], password=secrets['tv_password'])
         return TvDatafeed()
-    except Exception:
+    except Exception as e:
+        print(f"tvDatafeed connection error: {e}")
         return None
 
 
@@ -364,6 +365,7 @@ def fetch_price_data(tv=None, n_bars=84, secrets=None):
     if tv is None:
         tv = get_tv_connection(secrets)
     if tv is None:
+        print("fetch_price_data: no tv connection")
         return pd.DataFrame()
 
     try:
@@ -374,6 +376,7 @@ def fetch_price_data(tv=None, n_bars=84, secrets=None):
             interval=Interval.in_5_minute,
             n_bars=n_bars,
         )
+        print(f"fetch_price_data: got {type(df)}, empty={df is None or (hasattr(df, 'empty') and df.empty)}")
         if df is not None and not df.empty:
             df = df.rename(columns={
                 'open': 'Open', 'high': 'High',
@@ -391,9 +394,10 @@ def fetch_price_data(tv=None, n_bars=84, secrets=None):
                 df.index = df.index.tz_convert(et)
             except Exception:
                 pass
+            print(f"fetch_price_data: returning {len(df)} bars, cols={list(df.columns)}")
             return df
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"fetch_price_data ERROR: {e}")
     return pd.DataFrame()
 
 
