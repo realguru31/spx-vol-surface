@@ -38,7 +38,7 @@ DARK_CSS = """
     .stApp { background-color: #0a0e27; }
     header[data-testid="stHeader"] { background-color: #0a0e27; }
     [data-testid="stToolbar"] { display: none; }
-    .block-container { padding-top: 1rem; }
+    .block-container { padding-top: 2.5rem; }
 
     h1, h2, h3, h4 { color: #e0e6ff; font-family: 'Outfit', sans-serif; }
     p, span, div, label { color: #b0b8d4; }
@@ -731,7 +731,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ── Controls ──
-ctrl_cols = st.columns([1, 1, 1, 1, 2])
+ctrl_cols = st.columns([1, 1, 1, 1, 1])
 with ctrl_cols[0]:
     strike_step = st.selectbox("Strike Step", [5, 10, 25, 50, 100], index=2, key="sstep")
 with ctrl_cols[1]:
@@ -739,7 +739,8 @@ with ctrl_cols[1]:
 with ctrl_cols[2]:
     dte_mode = st.selectbox("DTE", [0, 1, 3, 7, 14, 30], format_func=lambda x: "0DTE" if x == 0 else f"{x}d", index=0, key="dtemode")
 with ctrl_cols[3]:
-    if st.button("🔄 Refresh", width="stretch"):
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh"):
         load_live_snapshot.clear()
         st.rerun()
 
