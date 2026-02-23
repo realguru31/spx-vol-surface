@@ -18,6 +18,26 @@ from fetch_data import (
     get_tv_connection, fetch_price_data, fetch_tv_spot, compute_iv_changes,
 )
 
+
+def empty_fig(msg="No data available"):
+    """Return a dark-themed empty figure with message."""
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg, xref="paper", yref="paper", x=0.5, y=0.5,
+        showarrow=False, font=dict(color='#888', size=14),
+    )
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='#0e1117',
+        plot_bgcolor='#161b22',
+        font=dict(color='#c9d1d9', size=10),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        height=500,
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+    return fig
+
 # ─────────────────────────────────────
 # Page Config
 # ─────────────────────────────────────
@@ -207,32 +227,47 @@ def ensure_data():
 # Chart Builders
 # ─────────────────────────────────────
 
-def create_vol_surface_table(current, prior, strike_step=50, pct_range=12):
+def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
     """
     Build the main vol surface table with changes.
     Returns: surface_df, changes_df, spot
     """
     surf_now, spot = build_vol_surface(current, strike_step=strike_step, pct_range=pct_range/100)
-    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
+    surf_prior, spot_prior = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
+
+    print(f"[VOL TABLE] surf_now: {surf_now.shape}, surf_prior: {surf_prior.shape}")
+    print(f"[VOL TABLE] now cols: {list(surf_now.columns)[:5]}")
+    print(f"[VOL TABLE] prior cols: {list(surf_prior.columns)[:5]}")
 
     if surf_now.empty:
         return pd.DataFrame(), pd.DataFrame(), 0
 
+    if surf_prior.empty:
+        print("[VOL TABLE] surf_prior is empty, returning empty changes")
+        return surf_now, pd.DataFrame(), spot
+
     # Align indices
-    common_strikes = surf_now.index.intersection(surf_prior.index) if not surf_prior.empty else surf_now.index
-    common_expiries = [c for c in surf_now.columns if c in surf_prior.columns] if not surf_prior.empty else []
+    common_strikes = surf_now.index.intersection(surf_prior.index)
+    common_expiries = [c for c in surf_now.columns if c in surf_prior.columns]
+
+    print(f"[VOL TABLE] common_strikes: {len(common_strikes)}, common_expiries: {common_expiries}")
+
+    if not common_expiries or len(common_strikes) == 0:
+        print("[VOL TABLE] No common strikes or expiries!")
+        return surf_now, pd.DataFrame(), spot
 
     changes = pd.DataFrame(index=common_strikes)
     for exp in common_expiries:
         changes[exp] = surf_now.loc[common_strikes, exp] - surf_prior.loc[common_strikes, exp]
 
+    print(f"[VOL TABLE] changes: {changes.shape}, empty={changes.empty}")
     return surf_now, changes, spot
 
 
 def create_surface_heatmap(surface_df, changes_df, spot):
     """Create the combined vol surface + changes heatmap chart."""
     if surface_df.empty:
-        return go.Figure()
+        return empty_fig("No surface data")
 
     # Build display table matching screenshot layout
     expiries = list(surface_df.columns)
@@ -303,7 +338,7 @@ def create_surface_heatmap(surface_df, changes_df, spot):
 def create_changes_heatmap(changes_df, spot):
     """Create vol changes heatmap (green = IV increase, red = decrease)."""
     if changes_df.empty:
-        return go.Figure()
+        return empty_fig("No prior data for comparison")
 
     strikes = changes_df.index.values
     expiries = list(changes_df.columns)
@@ -371,7 +406,7 @@ def create_changes_heatmap(changes_df, spot):
 def create_3d_surface(surface_df, spot):
     """Create 3D vol surface plot."""
     if surface_df.empty:
-        return go.Figure()
+        return empty_fig("No surface data")
 
     strikes = surface_df.index.values
     expiries = list(surface_df.columns)
@@ -417,7 +452,7 @@ def create_3d_surface(surface_df, spot):
 def create_fixed_strike_changes(changes_df, spot, expiry_idx=0):
     """Bar chart: IV changes per strike for a single expiry."""
     if changes_df.empty or len(changes_df.columns) <= expiry_idx:
-        return go.Figure()
+        return empty_fig("No prior data for comparison")
 
     exp = changes_df.columns[expiry_idx]
     data = changes_df[exp].dropna() * 100  # to percentage points
@@ -689,12 +724,17 @@ if current is None:
     st.error("❌ Failed to fetch data. Check your network and try again.")
     st.stop()
 
-# ── tvdatafeed connection ──
+# ── tvdatafeed connection (cached across reruns) ──
+@st.cache_resource(show_spinner=False)
+def _get_cached_tv():
+    """Singleton tvdatafeed connection."""
+    return get_tv_connection()
+
 try:
     tv_secrets = dict(st.secrets) if st.secrets else {}
 except Exception:
     tv_secrets = {}
-tv = get_tv_connection(tv_secrets)
+tv = _get_cached_tv()
 
 # ── Spot price from tvdatafeed (live) with fallback to snapshot ──
 tv_spot = fetch_tv_spot(tv, tv_secrets)
@@ -733,7 +773,7 @@ st.markdown(f"""
 # ── Controls ──
 ctrl_cols = st.columns([1, 1, 1, 1, 1])
 with ctrl_cols[0]:
-    strike_step = st.selectbox("Strike Step", [5, 10, 25, 50, 100], index=2, key="sstep")
+    strike_step = st.selectbox("Strike Step", [5, 10], index=1, key="sstep")
 with ctrl_cols[1]:
     pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=5, key="pctrange")
 with ctrl_cols[2]:
@@ -794,7 +834,7 @@ with row2_r:
         )
         fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx)
     else:
-        fig_fsc = go.Figure()
+        fig_fsc = empty_fig("No prior data for comparison")
     st.plotly_chart(fig_fsc, width="stretch", theme=None, key="fixedstrike")
 
 st.markdown('</div>', unsafe_allow_html=True)
