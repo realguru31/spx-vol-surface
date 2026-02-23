@@ -4,7 +4,6 @@ Fetches full vol surface data (multi-expiry) from Barchart.
 """
 
 import requests
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import json
@@ -94,26 +93,47 @@ def fetch_chain(session, xsrf, referer, expiry_date):
 # Snapshot Builder
 # ═══════════════════════════════════════
 
+def fetch_expiry_dates_from_barchart():
+    """Get available SPX option expiry dates from Barchart page."""
+    import re
+    page_url = 'https://www.barchart.com/stocks/quotes/$SPX/volatility-greeks'
+    headers = {
+        'accept': 'text/html,application/xhtml+xml',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+    try:
+        r = requests.get(page_url, headers=headers, timeout=15)
+        # Extract expiry dates from page HTML (data-ng-options or select options)
+        dates = re.findall(r'(\d{4}-\d{2}-\d{2})', r.text)
+        # Deduplicate and sort
+        unique_dates = sorted(set(d for d in dates if d >= datetime.now().strftime('%Y-%m-%d')))
+        if unique_dates:
+            return unique_dates
+    except Exception as e:
+        print(f"Failed to get expiries from page: {e}")
+
+    # Fallback: generate next 30 daily dates (SPX has daily expiries)
+    today = datetime.now()
+    return [(today + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(30)]
+
+
 def fetch_full_snapshot(num_expiries=8):
     """
     Fetch complete SPX vol surface snapshot from Barchart.
     Returns dict with date, spot, timestamp, and expiry chains.
+    No yfinance dependency.
     """
-    # Get spot price + expiry dates from yfinance (lightweight)
-    ticker = yf.Ticker("^SPX")
-    expiry_dates = list(ticker.options)
-    hist = ticker.history(period="5d")
-
-    if hist.empty or not expiry_dates:
-        return None
-
-    spot = float(hist['Close'].iloc[-1])
-
-    # Include today's expiry onwards
     today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # Get spot from tvdatafeed
+    spot = fetch_tv_spot()
+
+    # Get expiry dates from Barchart
+    expiry_dates = fetch_expiry_dates_from_barchart()
     future_expiries = [e for e in expiry_dates if e >= today_str][:num_expiries]
 
     if not future_expiries:
+        print("No future expiries found")
         return None
 
     # Barchart session
@@ -123,9 +143,13 @@ def fetch_full_snapshot(num_expiries=8):
         print("Failed to get XSRF token")
         return None
 
+    # If tvdatafeed spot failed, try to get from first chain
+    if spot is None:
+        print("tvdatafeed spot failed, will extract from chain data")
+
     snapshot = {
         'date': today_str,
-        'spot': spot,
+        'spot': spot or 0,
         'timestamp': datetime.now().isoformat(),
         'expiries': {},
     }
@@ -135,6 +159,11 @@ def fetch_full_snapshot(num_expiries=8):
         if rows:
             snapshot['expiries'][exp] = rows
             print(f"  {exp}: {len(rows)} rows")
+            # If spot is still missing, estimate from ATM strikes
+            if snapshot['spot'] == 0 and rows:
+                strikes = [r.get('strikePrice', 0) for r in rows if r.get('strikePrice')]
+                if strikes:
+                    snapshot['spot'] = round(np.median(strikes), 2)
 
     if not snapshot['expiries']:
         return None
