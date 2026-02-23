@@ -293,11 +293,14 @@ def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
     min_strike = spot * (1 - pct_range)
     max_strike = spot * (1 + pct_range)
 
+    print(f"[BUILD_SURF] spot={spot}, range={pct_range}, strikes={min_strike:.0f}-{max_strike:.0f}, step={strike_step}")
+
     surface = {}
 
     for exp, rows in snapshot['expiries'].items():
         df = pd.DataFrame(rows)
         if df.empty or 'strikePrice' not in df.columns:
+            print(f"[BUILD_SURF] {exp}: empty or no strikePrice column")
             continue
 
         # Filter to range
@@ -315,14 +318,17 @@ def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
         # Average IV per rounded strike (in case of duplicates)
         iv_map = otm.groupby('strike_rounded')['volatility'].mean()
         surface[exp] = iv_map
+        print(f"[BUILD_SURF] {exp}: {len(iv_map)} strikes after rounding")
 
     if not surface:
+        print("[BUILD_SURF] No surface data!")
         return pd.DataFrame(), spot
 
     surface_df = pd.DataFrame(surface)
     surface_df.index.name = 'Strike'
     surface_df = surface_df.sort_index()
 
+    print(f"[BUILD_SURF] Final surface: {surface_df.shape}, cols={list(surface_df.columns)}")
     return surface_df, spot
 
 
