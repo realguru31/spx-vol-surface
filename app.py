@@ -235,10 +235,6 @@ def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
     surf_now, spot = build_vol_surface(current, strike_step=strike_step, pct_range=pct_range/100)
     surf_prior, spot_prior = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
 
-    print(f"[VOL TABLE] surf_now: {surf_now.shape}, surf_prior: {surf_prior.shape}")
-    print(f"[VOL TABLE] now cols: {list(surf_now.columns)[:5]}")
-    print(f"[VOL TABLE] prior cols: {list(surf_prior.columns)[:5]}")
-
     if surf_now.empty:
         return pd.DataFrame(), pd.DataFrame(), 0
 
@@ -246,21 +242,50 @@ def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
         print("[VOL TABLE] surf_prior is empty, returning empty changes")
         return surf_now, pd.DataFrame(), spot
 
-    # Align indices
-    common_strikes = surf_now.index.intersection(surf_prior.index)
-    common_expiries = [c for c in surf_now.columns if c in surf_prior.columns]
+    # Match expiries by proximity (handles monthly-vs-weekly mismatch)
+    # For each current expiry, find the closest prior expiry
+    from datetime import datetime as dt
+    now_exps = list(surf_now.columns)
+    prior_exps = list(surf_prior.columns)
 
-    print(f"[VOL TABLE] common_strikes: {len(common_strikes)}, common_expiries: {common_expiries}")
+    # Try exact match first
+    exact_matches = [e for e in now_exps if e in prior_exps]
 
-    if not common_expiries or len(common_strikes) == 0:
-        print("[VOL TABLE] No common strikes or expiries!")
+    if exact_matches:
+        # Use exact matches
+        expiry_pairs = [(e, e) for e in exact_matches]
+        print(f"[VOL TABLE] Exact expiry matches: {exact_matches}")
+    else:
+        # Pair by nearest date
+        expiry_pairs = []
+        for ne in now_exps:
+            try:
+                ne_dt = dt.strptime(ne, '%Y-%m-%d')
+                best = min(prior_exps, key=lambda pe: abs((dt.strptime(pe, '%Y-%m-%d') - ne_dt).days))
+                days_diff = abs((dt.strptime(best, '%Y-%m-%d') - ne_dt).days)
+                if days_diff <= 30:  # Only pair if within 30 days
+                    expiry_pairs.append((ne, best))
+                    print(f"[VOL TABLE] Paired {ne} → {best} (Δ{days_diff}d)")
+            except Exception:
+                continue
+
+    if not expiry_pairs:
+        print("[VOL TABLE] No expiry pairs found!")
         return surf_now, pd.DataFrame(), spot
 
-    changes = pd.DataFrame(index=common_strikes)
-    for exp in common_expiries:
-        changes[exp] = surf_now.loc[common_strikes, exp] - surf_prior.loc[common_strikes, exp]
+    # Align strikes
+    common_strikes = surf_now.index.intersection(surf_prior.index)
+    if len(common_strikes) == 0:
+        print("[VOL TABLE] No common strikes!")
+        return surf_now, pd.DataFrame(), spot
 
-    print(f"[VOL TABLE] changes: {changes.shape}, empty={changes.empty}")
+    print(f"[VOL TABLE] {len(common_strikes)} common strikes, {len(expiry_pairs)} expiry pairs")
+
+    changes = pd.DataFrame(index=common_strikes)
+    for now_exp, prior_exp in expiry_pairs:
+        # Label the changes column with the current expiry date
+        changes[now_exp] = surf_now.loc[common_strikes, now_exp] - surf_prior.loc[common_strikes, prior_exp]
+
     return surf_now, changes, spot
 
 
