@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 from fetch_data import (
@@ -160,8 +160,8 @@ def load_live_snapshot():
 def ensure_data():
     """
     Load current + prior snapshots.
-    - Current: live fetch (cached) → also save to disk
-    - Prior: most recent saved snapshot before today, or synthetic
+    - Current: today's snapshot → live fetch → most recent available
+    - Prior: most recent saved snapshot before current, or synthetic
     """
     today_str = datetime.now().strftime('%Y-%m-%d')
 
@@ -169,22 +169,35 @@ def ensure_data():
     current = load_snapshot(today_str)
     if current is None:
         with st.spinner("Fetching live data from Barchart..."):
-            current = load_live_snapshot()
+            try:
+                current = load_live_snapshot()
+            except Exception as e:
+                print(f"Live fetch failed: {e}")
+                current = None
         if current is not None:
             save_snapshot(current)
+
+    # Fallback: use most recent available snapshot (weekends, holidays, errors)
+    if current is None:
+        snapshots = list_snapshots()
+        if snapshots:
+            current = load_snapshot(snapshots[0])  # newest available
+            if current:
+                print(f"Using most recent snapshot: {snapshots[0]}")
 
     if current is None:
         return None, None
 
-    # Prior: find most recent snapshot before today
-    prior = get_prior_snapshot(today_str)
+    current_date = current.get('date', today_str)
+
+    # Prior: find most recent snapshot before current
+    prior = get_prior_snapshot(current_date)
 
     # If no prior exists, generate synthetic
     if prior is None:
         prior = generate_synthetic_prior(current)
         if prior is not None:
-            # Save synthetic so it persists
-            prior['date'] = (datetime.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            prior['date'] = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
             save_snapshot(prior)
 
     return current, prior
@@ -579,16 +592,6 @@ def create_combined_price_iv_chart(price_df, iv_changes_df, spot):
             showlegend=False,
         ), row=1, col=1)
 
-        # Full 7hr timeline for x-axis (padding right side)
-        full_labels = []
-        for h in range(9, 17):
-            for m in range(0, 60, 5):
-                if h == 9 and m < 30:
-                    continue
-                if h == 16 and m > 0:
-                    break
-                full_labels.append(f"{h:02d}:{m:02d}")
-
         # Spot line
         if spot:
             fig.add_hline(
@@ -599,7 +602,6 @@ def create_combined_price_iv_chart(price_df, iv_changes_df, spot):
                 row=1, col=1,
             )
     else:
-        full_labels = []
         fig.add_annotation(
             text="No price data (tvdatafeed unavailable)",
             xref="paper", yref="paper", x=0.3, y=0.5,
@@ -653,9 +655,7 @@ def create_combined_price_iv_chart(price_df, iv_changes_df, spot):
         # Candle x-axis
         xaxis=dict(
             gridcolor=CS['grid'],
-            categoryorder='array',
-            categoryarray=full_labels if full_labels else None,
-            range=[-0.5, len(full_labels) - 0.5] if full_labels else None,
+            type='category',
             rangeslider_visible=False,
             title='Time (ET)',
             tickfont=dict(size=8),
