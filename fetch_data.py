@@ -94,27 +94,41 @@ def fetch_chain(session, xsrf, referer, expiry_date):
 # ═══════════════════════════════════════
 
 def fetch_expiry_dates_from_barchart():
-    """Get available SPX option expiry dates from Barchart page."""
+    """Get available SPX option expiry dates.
+    SPX has Mon/Wed/Fri weekly expirations plus monthly (3rd Friday).
+    Generate known schedule + scrape Barchart page for extra dates.
+    """
     import re
-    page_url = 'https://www.barchart.com/stocks/quotes/$SPX/volatility-greeks'
-    headers = {
-        'accept': 'text/html,application/xhtml+xml',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    }
-    try:
-        r = requests.get(page_url, headers=headers, timeout=15)
-        # Extract expiry dates from page HTML (data-ng-options or select options)
-        dates = re.findall(r'(\d{4}-\d{2}-\d{2})', r.text)
-        # Deduplicate and sort
-        unique_dates = sorted(set(d for d in dates if d >= datetime.now().strftime('%Y-%m-%d')))
-        if unique_dates:
-            return unique_dates
-    except Exception as e:
-        print(f"Failed to get expiries from page: {e}")
-
-    # Fallback: generate next 30 daily dates (SPX has daily expiries)
     today = datetime.now()
-    return [(today + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(30)]
+    today_str = today.strftime('%Y-%m-%d')
+
+    # Generate SPX expiry dates: Mon(0), Wed(2), Fri(4) for next 60 days
+    generated = []
+    for i in range(60):
+        d = today + timedelta(days=i)
+        if d.weekday() in (0, 2, 4):  # Mon, Wed, Fri
+            generated.append(d.strftime('%Y-%m-%d'))
+
+    # Also try scraping Barchart page for any additional dates
+    scraped = []
+    try:
+        page_url = 'https://www.barchart.com/stocks/quotes/$SPX/volatility-greeks'
+        headers = {
+            'accept': 'text/html,application/xhtml+xml',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        r = requests.get(page_url, headers=headers, timeout=15)
+        dates = re.findall(r'(\d{4}-\d{2}-\d{2})', r.text)
+        scraped = [d for d in set(dates) if d >= today_str]
+        print(f"[EXPIRY] Scraped {len(scraped)} dates from Barchart HTML")
+    except Exception as e:
+        print(f"[EXPIRY] Barchart scrape failed: {e}")
+
+    # Merge and deduplicate
+    all_dates = sorted(set(generated + scraped))
+    future = [d for d in all_dates if d >= today_str]
+    print(f"[EXPIRY] {len(future)} candidate expiry dates (generated={len(generated)}, scraped={len(scraped)})")
+    return future
 
 
 def fetch_full_snapshot(num_expiries=8):
@@ -130,11 +144,13 @@ def fetch_full_snapshot(num_expiries=8):
 
     # Get expiry dates from Barchart
     expiry_dates = fetch_expiry_dates_from_barchart()
-    future_expiries = [e for e in expiry_dates if e >= today_str][:num_expiries]
+    future_expiries = [e for e in expiry_dates if e >= today_str][:num_expiries * 2]  # Try extra, some will be invalid
 
     if not future_expiries:
-        print("No future expiries found")
+        print("[SNAPSHOT] No future expiries found")
         return None
+
+    print(f"[SNAPSHOT] Trying {len(future_expiries)} expiry dates, target {num_expiries} chains")
 
     # Barchart session
     session, xsrf, referer = get_barchart_session()
@@ -164,10 +180,17 @@ def fetch_full_snapshot(num_expiries=8):
                 strikes = [r.get('strikePrice', 0) for r in rows if r.get('strikePrice')]
                 if strikes:
                     snapshot['spot'] = round(np.median(strikes), 2)
+            # Stop once we have enough
+            if len(snapshot['expiries']) >= num_expiries:
+                break
+        else:
+            print(f"  {exp}: EMPTY (no data returned)")
 
     if not snapshot['expiries']:
+        print("[SNAPSHOT] No chains fetched successfully")
         return None
 
+    print(f"[SNAPSHOT] Got {len(snapshot['expiries'])} expiries: {list(snapshot['expiries'].keys())}")
     return snapshot
 
 
