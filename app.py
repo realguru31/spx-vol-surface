@@ -751,7 +751,7 @@ st.markdown('<div class="chart-title">SPX PRICE &amp; IV CHANGES</div>', unsafe_
 price_df = fetch_price_data(tv, n_bars=84, secrets=tv_secrets)
 iv_changes = compute_iv_changes(current, prior, max_dte=dte_mode, strike_step=strike_step, pct_range=pct_range/100)
 fig_combined = create_combined_price_iv_chart(price_df, iv_changes, spot)
-st.plotly_chart(fig_combined, width="stretch", theme=None)
+st.plotly_chart(fig_combined, width="stretch", theme=None, key="combined")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -765,12 +765,12 @@ row1_l, row1_r = st.columns(2)
 with row1_l:
     st.markdown('<div class="chart-title">VOL SURFACE</div>', unsafe_allow_html=True)
     fig_surface = create_surface_heatmap(surface_df, changes_df, spot)
-    st.plotly_chart(fig_surface, width="stretch", theme=None)
+    st.plotly_chart(fig_surface, width="stretch", theme=None, key="surface")
 
 with row1_r:
     st.markdown('<div class="chart-title">VOL CHANGES</div>', unsafe_allow_html=True)
     fig_changes = create_changes_heatmap(changes_df, spot)
-    st.plotly_chart(fig_changes, width="stretch", theme=None)
+    st.plotly_chart(fig_changes, width="stretch", theme=None, key="changes")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -780,7 +780,7 @@ row2_l, row2_r = st.columns(2)
 
 with row2_l:
     fig_3d = create_3d_surface(surface_df, spot)
-    st.plotly_chart(fig_3d, width="stretch", theme=None)
+    st.plotly_chart(fig_3d, width="stretch", theme=None, key="surface3d")
 
 with row2_r:
     # Expiry selector for fixed-strike changes
@@ -795,7 +795,7 @@ with row2_r:
         fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx)
     else:
         fig_fsc = go.Figure()
-    st.plotly_chart(fig_fsc, width="stretch", theme=None)
+    st.plotly_chart(fig_fsc, width="stretch", theme=None, key="fixedstrike")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -805,11 +805,11 @@ row3_l, row3_r = st.columns(2)
 
 with row3_l:
     fig_skew = create_skew_chart(current, prior, expiry_idx=0)
-    st.plotly_chart(fig_skew, width="stretch", theme=None)
+    st.plotly_chart(fig_skew, width="stretch", theme=None, key="skew")
 
 with row3_r:
     fig_term = create_term_structure(current, prior)
-    st.plotly_chart(fig_term, width="stretch", theme=None)
+    st.plotly_chart(fig_term, width="stretch", theme=None, key="termstruct")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
