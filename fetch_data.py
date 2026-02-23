@@ -338,3 +338,172 @@ def build_skew(snapshot, expiry_idx=0, pct_range=0.10):
     otm = pd.concat([puts, calls]).sort_values('strikePrice')
 
     return otm[['strikePrice', 'volatility']].reset_index(drop=True), spot, exp
+
+
+# ═══════════════════════════════════════
+# TvDatafeed — Price Data
+# ═══════════════════════════════════════
+
+def get_tv_connection(secrets=None):
+    """Get tvDatafeed connection. Uses st.secrets if available."""
+    try:
+        from tvDatafeed import TvDatafeed, Interval
+        if secrets and 'tv_username' in secrets and 'tv_password' in secrets:
+            return TvDatafeed(username=secrets['tv_username'], password=secrets['tv_password'])
+        return TvDatafeed()
+    except Exception:
+        return None
+
+
+def fetch_price_data(tv=None, n_bars=84, secrets=None):
+    """
+    Fetch SPX 5-min candles from TradingView (OANDA:SPX500USD).
+    7 hours × 12 bars/hour = 84 bars.
+    Returns DataFrame with Open, High, Low, Close columns, index in ET.
+    """
+    if tv is None:
+        tv = get_tv_connection(secrets)
+    if tv is None:
+        return pd.DataFrame()
+
+    try:
+        from tvDatafeed import Interval
+        df = tv.get_hist(
+            symbol='SPX500USD',
+            exchange='OANDA',
+            interval=Interval.in_5_minute,
+            n_bars=n_bars,
+        )
+        if df is not None and not df.empty:
+            df = df.rename(columns={
+                'open': 'Open', 'high': 'High',
+                'low': 'Low', 'close': 'Close', 'volume': 'Volume',
+            })
+            # Convert to ET
+            import pytz
+            et = pytz.timezone('US/Eastern')
+            if df.index.tz is None:
+                try:
+                    df.index = df.index.tz_localize('UTC')
+                except Exception:
+                    pass
+            try:
+                df.index = df.index.tz_convert(et)
+            except Exception:
+                pass
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def fetch_tv_spot(tv=None, secrets=None):
+    """Get current SPX spot price from TradingView."""
+    if tv is None:
+        tv = get_tv_connection(secrets)
+    if tv is None:
+        return None
+
+    try:
+        from tvDatafeed import Interval
+        df = tv.get_hist(
+            symbol='SPX500USD',
+            exchange='OANDA',
+            interval=Interval.in_1_minute,
+            n_bars=1,
+        )
+        if df is not None and not df.empty:
+            return float(df['close'].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+# ═══════════════════════════════════════
+# IV Change Aggregation (for combined chart)
+# ═══════════════════════════════════════
+
+def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05):
+    """
+    Compute per-strike IV changes between current live data and prior snapshot.
+
+    max_dte: 0 = today only (0DTE), 7 = next 7 days, etc.
+    Aggregation: average IV per strike across selected expiries, then diff.
+
+    Returns DataFrame with columns: strike, iv_now, iv_prior, iv_change
+    """
+    if current is None or prior is None:
+        return pd.DataFrame()
+
+    spot = current['spot']
+    min_strike = spot * (1 - pct_range)
+    max_strike = spot * (1 + pct_range)
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # Select expiries within DTE range
+    def select_expiries(snapshot, dte_days):
+        cutoff = (datetime.now() + timedelta(days=dte_days + 1)).strftime('%Y-%m-%d')
+        return [e for e in snapshot['expiries'].keys() if e <= cutoff]
+
+    if max_dte == 0:
+        # 0DTE: only today's expiry
+        current_expiries = [e for e in current['expiries'].keys() if e == today_str]
+        # Prior: use same date if exists, else first expiry
+        prior_expiries = [e for e in prior['expiries'].keys() if e == today_str]
+        if not prior_expiries:
+            # Fallback: use the first (nearest) expiry in prior
+            prior_expiries = list(prior['expiries'].keys())[:1]
+    else:
+        current_expiries = select_expiries(current, max_dte)
+        prior_expiries = select_expiries(prior, max_dte)
+
+    if not current_expiries or not prior_expiries:
+        # Fallback: use all available
+        current_expiries = list(current['expiries'].keys())[:max(1, max_dte // 2)]
+        prior_expiries = list(prior['expiries'].keys())[:max(1, max_dte // 2)]
+
+    def aggregate_iv(snapshot, expiries, min_s, max_s, step):
+        """Average IV per rounded strike across selected expiries, using OTM."""
+        all_rows = []
+        spot_val = snapshot['spot']
+        for exp in expiries:
+            if exp not in snapshot['expiries']:
+                continue
+            df = pd.DataFrame(snapshot['expiries'][exp])
+            if df.empty:
+                continue
+            df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
+            # OTM: puts below spot, calls at/above
+            puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot_val)]
+            calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot_val)]
+            otm = pd.concat([puts, calls])
+            all_rows.append(otm)
+
+        if not all_rows:
+            return pd.Series(dtype=float)
+
+        combined = pd.concat(all_rows)
+        combined['strike_rounded'] = (combined['strikePrice'] / step).round() * step
+        return combined.groupby('strike_rounded')['volatility'].mean()
+
+    iv_now = aggregate_iv(current, current_expiries, min_strike, max_strike, strike_step)
+    iv_prior = aggregate_iv(prior, prior_expiries, min_strike, max_strike, strike_step)
+
+    if iv_now.empty or iv_prior.empty:
+        return pd.DataFrame()
+
+    # Align on common strikes
+    common = iv_now.index.intersection(iv_prior.index)
+    if len(common) == 0:
+        return pd.DataFrame()
+
+    result = pd.DataFrame({
+        'strike': common,
+        'iv_now': iv_now.loc[common].values,
+        'iv_prior': iv_prior.loc[common].values,
+    })
+    result['iv_change'] = (result['iv_now'] - result['iv_prior']) * 100  # Vol points
+    result = result.sort_values('strike').reset_index(drop=True)
+
+    return result
