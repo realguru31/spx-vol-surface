@@ -1,870 +1,587 @@
 """
-app.py — SPX Volatility Surface Changes Dashboard
-Streamlit app replicating professional vol surface analysis.
+fetch_data.py — Barchart SPX Options Chain Fetcher
+Fetches full vol surface data (multi-expiry) from Barchart.
 """
 
-import streamlit as st
+import requests
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import json
+import os
 from datetime import datetime, timedelta
-import pytz
-
-from fetch_data import (
-    fetch_full_snapshot, save_snapshot, load_snapshot,
-    list_snapshots, get_prior_snapshot, generate_synthetic_prior,
-    build_vol_surface, build_term_structure, build_skew,
-    get_tv_connection, fetch_price_data, fetch_tv_spot, compute_iv_changes,
-)
+from urllib.parse import unquote
 
 
-def empty_fig(msg="No data available"):
-    """Return a dark-themed empty figure with message."""
-    fig = go.Figure()
-    fig.add_annotation(
-        text=msg, xref="paper", yref="paper", x=0.5, y=0.5,
-        showarrow=False, font=dict(color='#888', size=14),
-    )
-    fig.update_layout(
-        template='plotly_dark',
-        paper_bgcolor='#0e1117',
-        plot_bgcolor='#161b22',
-        font=dict(color='#c9d1d9', size=10),
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
-        height=500,
-        margin=dict(l=20, r=20, t=20, b=20),
-    )
-    return fig
+# ═══════════════════════════════════════
+# Barchart Session
+# ═══════════════════════════════════════
 
-# ─────────────────────────────────────
-# Page Config
-# ─────────────────────────────────────
-st.set_page_config(
-    page_title="SPX Vol Surface",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-# ─────────────────────────────────────
-# Theme / CSS
-# ─────────────────────────────────────
-DARK_CSS = """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;600;700&display=swap');
-
-    .stApp { background-color: #0a0e27; }
-    header[data-testid="stHeader"] { background-color: #0a0e27; }
-    [data-testid="stToolbar"] { display: none; }
-    .block-container { padding-top: 2.5rem; }
-
-    h1, h2, h3, h4 { color: #e0e6ff; font-family: 'Outfit', sans-serif; }
-    p, span, div, label { color: #b0b8d4; }
-
-    /* Title bar */
-    .title-bar {
-        background: linear-gradient(135deg, #0d1340 0%, #141a4a 100%);
-        border: 1px solid #1e2a6e;
-        border-radius: 8px;
-        padding: 12px 20px;
-        margin-bottom: 16px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+def get_barchart_session():
+    """Establish Barchart session with XSRF token."""
+    page_url = 'https://www.barchart.com/stocks/quotes/$SPX/volatility-greeks'
+    headers = {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'max-age=0',
+        'upgrade-insecure-requests': '1',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
-    .title-main {
-        font-family: 'Outfit', sans-serif;
-        font-size: 24px;
-        font-weight: 700;
-        color: #ffffff;
-        letter-spacing: 1px;
-    }
-    .title-sub {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 12px;
-        color: #6b75a8;
-    }
-    .spot-badge {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 14px;
-        color: #00e5ff;
-    }
-    .spot-change-up { color: #00e676; font-weight: 600; }
-    .spot-change-down { color: #ff5252; font-weight: 600; }
+    session = requests.Session()
+    session.get(page_url, headers=headers)
+    cookies = session.cookies.get_dict()
+    xsrf = unquote(cookies.get('XSRF-TOKEN', ''))
+    return session, xsrf, page_url
 
-    /* Cards */
-    .chart-card {
-        background: linear-gradient(180deg, #0d1340 0%, #0a0e27 100%);
-        border: 1px solid #1e2a6e;
-        border-radius: 8px;
-        padding: 8px;
-        margin-bottom: 12px;
+
+def fetch_chain(session, xsrf, referer, expiry_date):
+    """Fetch single expiry options chain from Barchart API. Returns list of dicts."""
+    api_url = 'https://www.barchart.com/proxies/core-api/v1/options/get'
+    headers = {
+        'accept': 'application/json',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'en-US,en;q=0.9',
+        'referer': referer,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'x-xsrf-token': xsrf,
     }
-    .chart-title {
-        font-family: 'Outfit', sans-serif;
-        font-size: 14px;
-        font-weight: 600;
-        color: #8892c4;
-        text-transform: uppercase;
-        letter-spacing: 1.5px;
-        margin-bottom: 4px;
-        padding-left: 4px;
+    params = {
+        'baseSymbol': '$SPX',
+        'fields': 'strikePrice,lastPrice,volatility,delta,gamma,theta,vega,rho,openInterest,volume,optionType,daysToExpiration,expirationDate,bidPrice,askPrice',
+        'expirationDate': expiry_date,
+        'meta': 'field.shortName,field.type,field.description',
+        'raw': '1',
+        'limit': '500',
     }
 
-    /* Date badges */
-    .date-badge {
-        display: inline-block;
-        background: rgba(30, 42, 110, 0.6);
-        border: 1px solid #2a3a8e;
-        border-radius: 4px;
-        padding: 2px 8px;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 11px;
-        margin-right: 6px;
-    }
-    .date-current { color: #00e5ff; border-color: #00e5ff40; }
-    .date-prior { color: #ff9800; border-color: #ff980040; }
+    try:
+        r = session.get(api_url, headers=headers, params=params)
+        if r.status_code != 200:
+            return []
 
-    /* Plotly chart backgrounds */
-    .js-plotly-plot .plotly .main-svg { border-radius: 6px; }
+        data = r.json()
+        raw_data = data.get('data', [])
 
-    /* Streamlit overrides */
-    [data-testid="stMetricValue"] {
-        font-family: 'JetBrains Mono', monospace;
-        color: #00e5ff;
-    }
-    [data-testid="stMetricLabel"] {
-        font-family: 'Outfit', sans-serif;
-        color: #6b75a8;
-    }
-    .stSelectbox label, .stSlider label {
-        font-family: 'Outfit', sans-serif;
-        color: #8892c4;
-    }
-</style>
-"""
-st.markdown(DARK_CSS, unsafe_allow_html=True)
+        # Handle grouped response (dict with Call/Put keys)
+        if isinstance(raw_data, dict):
+            all_rows = []
+            for group_key, group_rows in raw_data.items():
+                if isinstance(group_rows, list):
+                    for row in group_rows:
+                        if isinstance(row, dict) and 'raw' in row:
+                            entry = row['raw']
+                        elif isinstance(row, dict):
+                            entry = row
+                        else:
+                            continue
+                        # Ensure optionType is set from the group key
+                        if 'optionType' not in entry and group_key in ('Call', 'Put'):
+                            entry['optionType'] = group_key
+                        all_rows.append(entry)
+            return all_rows
 
+        # Handle flat list response
+        elif isinstance(raw_data, list):
+            return [
+                row['raw'] if isinstance(row, dict) and 'raw' in row else row
+                for row in raw_data
+                if isinstance(row, dict)
+            ]
 
-# ─────────────────────────────────────
-# Color Scheme
-# ─────────────────────────────────────
-CS = {
-    'bg': '#0a0e27',
-    'plot_bg': '#0d1340',
-    'grid': '#1a2050',
-    'text': '#b0b8d4',
-    'cyan': '#00e5ff',
-    'gold': '#ffd740',
-    'green': '#00e676',
-    'red': '#ff5252',
-    'orange': '#ff9800',
-    'purple': '#bb86fc',
-    'magenta': '#e040fb',
-    'blue': '#448aff',
-    'border': '#1e2a6e',
-}
+        return []
+
+    except Exception as e:
+        print(f"Error fetching {expiry_date}: {e}")
+        return []
 
 
-# ─────────────────────────────────────
-# Data Loading (cached)
-# ─────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def load_live_snapshot():
-    """Fetch live data from Barchart. Cached 5 min."""
-    return fetch_full_snapshot(num_expiries=8)
+# ═══════════════════════════════════════
+# Snapshot Builder
+# ═══════════════════════════════════════
 
-
-def ensure_data():
+def fetch_expiry_dates_from_barchart():
+    """Get available SPX option expiry dates.
+    SPX has DAILY 0DTE expirations (every business day).
+    Generate all weekdays + scrape Barchart page for extra dates.
     """
-    Load current + prior snapshots.
-    - Current: today's snapshot → live fetch → most recent available
-    - Prior: most recent saved snapshot before current, or synthetic
+    import re
+    today = datetime.now()
+    today_str = today.strftime('%Y-%m-%d')
+
+    # Generate SPX expiry dates: every weekday for next 60 days
+    generated = []
+    for i in range(60):
+        d = today + timedelta(days=i)
+        if d.weekday() < 5:  # Mon-Fri
+            generated.append(d.strftime('%Y-%m-%d'))
+
+    # Also try scraping Barchart page for any additional dates
+    scraped = []
+    try:
+        page_url = 'https://www.barchart.com/stocks/quotes/$SPX/volatility-greeks'
+        headers = {
+            'accept': 'text/html,application/xhtml+xml',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        r = requests.get(page_url, headers=headers, timeout=15)
+        dates = re.findall(r'(\d{4}-\d{2}-\d{2})', r.text)
+        scraped = [d for d in set(dates) if d >= today_str]
+        print(f"[EXPIRY] Scraped {len(scraped)} dates from Barchart HTML")
+    except Exception as e:
+        print(f"[EXPIRY] Barchart scrape failed: {e}")
+
+    # Merge and deduplicate
+    all_dates = sorted(set(generated + scraped))
+    future = [d for d in all_dates if d >= today_str]
+    print(f"[EXPIRY] {len(future)} candidate expiry dates (generated={len(generated)}, scraped={len(scraped)})")
+    return future
+
+
+def fetch_full_snapshot(num_expiries=8):
+    """
+    Fetch complete SPX vol surface snapshot from Barchart.
+    Returns dict with date, spot, timestamp, and expiry chains.
+    No yfinance dependency.
     """
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # Try loading today's saved snapshot first
-    current = load_snapshot(today_str)
-    if current is None:
-        with st.spinner("Fetching live data from Barchart..."):
+    # Get spot from tvdatafeed
+    spot = fetch_tv_spot()
+
+    # Get expiry dates from Barchart
+    expiry_dates = fetch_expiry_dates_from_barchart()
+    future_expiries = [e for e in expiry_dates if e >= today_str][:num_expiries * 2]  # Try extra, some will be invalid
+
+    if not future_expiries:
+        print("[SNAPSHOT] No future expiries found")
+        return None
+
+    print(f"[SNAPSHOT] Trying {len(future_expiries)} expiry dates, target {num_expiries} chains")
+
+    # Barchart session
+    session, xsrf, referer = get_barchart_session()
+
+    if not xsrf:
+        print("Failed to get XSRF token")
+        return None
+
+    # If tvdatafeed spot failed, try to get from first chain
+    if spot is None:
+        print("tvdatafeed spot failed, will extract from chain data")
+
+    snapshot = {
+        'date': today_str,
+        'spot': spot or 0,
+        'timestamp': datetime.now().isoformat(),
+        'expiries': {},
+    }
+
+    for exp in future_expiries:
+        rows = fetch_chain(session, xsrf, referer, exp)
+        if rows:
+            snapshot['expiries'][exp] = rows
+            print(f"  {exp}: {len(rows)} rows")
+            # If spot is still missing, estimate from ATM strikes
+            if snapshot['spot'] == 0 and rows:
+                strikes = [r.get('strikePrice', 0) for r in rows if r.get('strikePrice')]
+                if strikes:
+                    snapshot['spot'] = round(np.median(strikes), 2)
+            # Stop once we have enough
+            if len(snapshot['expiries']) >= num_expiries:
+                break
+        else:
+            print(f"  {exp}: EMPTY (no data returned)")
+
+    if not snapshot['expiries']:
+        print("[SNAPSHOT] No chains fetched successfully")
+        return None
+
+    print(f"[SNAPSHOT] Got {len(snapshot['expiries'])} expiries: {list(snapshot['expiries'].keys())}")
+    return snapshot
+
+
+# ═══════════════════════════════════════
+# Snapshot I/O
+# ═══════════════════════════════════════
+
+def save_snapshot(snapshot, directory='snapshots'):
+    """Save snapshot as JSON file: snapshots/YYYY-MM-DD.json"""
+    os.makedirs(directory, exist_ok=True)
+    filepath = os.path.join(directory, f"{snapshot['date']}.json")
+    with open(filepath, 'w') as f:
+        json.dump(snapshot, f, default=str)
+    size_kb = os.path.getsize(filepath) / 1024
+    print(f"Saved: {filepath} ({size_kb:.1f} KB)")
+    return filepath
+
+
+def load_snapshot(date_str, directory='snapshots'):
+    """Load snapshot JSON for a given date. Returns dict or None."""
+    filepath = os.path.join(directory, f"{date_str}.json")
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, 'r') as f:
+        return json.load(f)
+
+
+def list_snapshots(directory='snapshots'):
+    """List available snapshot dates, sorted descending (newest first)."""
+    if not os.path.exists(directory):
+        return []
+    files = [f.replace('.json', '') for f in os.listdir(directory) if f.endswith('.json')]
+    return sorted(files, reverse=True)
+
+
+def get_prior_snapshot(current_date_str, directory='snapshots'):
+    """Get the most recent snapshot BEFORE current_date_str."""
+    dates = list_snapshots(directory)
+    for d in dates:
+        if d < current_date_str:
+            return load_snapshot(d, directory)
+    return None
+
+
+# ═══════════════════════════════════════
+# Synthetic Prior (Day-1 bootstrap)
+# ═══════════════════════════════════════
+
+def generate_synthetic_prior(today_snapshot):
+    """
+    Create a synthetic 'prior' snapshot by perturbing today's data.
+    Used for initial deployment when no historical data exists.
+    """
+    if today_snapshot is None:
+        return None
+
+    np.random.seed(42)
+    spot = today_snapshot['spot']
+
+    prior = {
+        'date': 'synthetic_prior',
+        'spot': round(spot * 0.9816, 2),  # ~1.84% lower (matches screenshot example)
+        'timestamp': 'synthetic',
+        'expiries': {},
+    }
+
+    for exp, rows in today_snapshot['expiries'].items():
+        prior_rows = []
+        for row in rows:
+            new_row = row.copy()
+            iv = row.get('volatility', 0)
+            if iv and iv > 0:
+                # Distance-weighted noise: bigger shift for far OTM
+                distance = abs(row.get('strikePrice', spot) - spot) / spot
+                noise = np.random.normal(0, 0.003 + distance * 0.015)
+                new_row['volatility'] = round(max(0.01, iv + noise), 6)
+            # Slightly different OI and volume
+            oi = row.get('openInterest', 0)
+            new_row['openInterest'] = max(0, int(oi * np.random.uniform(0.8, 1.2)))
+            prior_rows.append(new_row)
+        prior['expiries'][exp] = prior_rows
+
+    return prior
+
+
+# ═══════════════════════════════════════
+# Vol Surface Builder
+# ═══════════════════════════════════════
+
+def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
+    """
+    Build vol surface DataFrame from snapshot.
+    Rows = strikes, Columns = expiry dates, Values = IV (decimal).
+    Uses OTM options: puts below spot, calls at/above spot.
+    """
+    if snapshot is None:
+        return pd.DataFrame(), 0
+
+    spot = snapshot['spot']
+    min_strike = spot * (1 - pct_range)
+    max_strike = spot * (1 + pct_range)
+
+    print(f"[BUILD_SURF] spot={spot}, range={pct_range}, strikes={min_strike:.0f}-{max_strike:.0f}, step={strike_step}")
+
+    surface = {}
+
+    for exp, rows in snapshot['expiries'].items():
+        df = pd.DataFrame(rows)
+        if df.empty or 'strikePrice' not in df.columns:
+            print(f"[BUILD_SURF] {exp}: empty or no strikePrice column")
+            continue
+
+        # Guard: skip expiry if optionType is missing
+        if 'optionType' not in df.columns:
+            print(f"[BUILD_SURF] {exp}: no optionType column, skipping")
+            continue
+
+        # Filter to range
+        df = df[(df['strikePrice'] >= min_strike) & (df['strikePrice'] <= max_strike)]
+
+        # Filter out zero/null volatility
+        df = df[df['volatility'].notna() & (df['volatility'] > 0)]
+
+        # Use OTM: puts below spot, calls at/above
+        puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot)]
+        calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot)]
+        otm = pd.concat([puts, calls])
+
+        # Round strikes to step
+        otm = otm.copy()
+        otm['strike_rounded'] = (otm['strikePrice'] / strike_step).round() * strike_step
+
+        # Average IV per rounded strike (in case of duplicates)
+        iv_map = otm.groupby('strike_rounded')['volatility'].mean()
+        surface[exp] = iv_map
+        print(f"[BUILD_SURF] {exp}: {len(iv_map)} strikes after rounding")
+
+    if not surface:
+        print("[BUILD_SURF] No surface data!")
+        return pd.DataFrame(), spot
+
+    surface_df = pd.DataFrame(surface)
+    surface_df.index.name = 'Strike'
+    surface_df = surface_df.sort_index()
+
+    print(f"[BUILD_SURF] Final surface: {surface_df.shape}, cols={list(surface_df.columns)}")
+    return surface_df, spot
+
+
+def build_term_structure(snapshot):
+    """
+    Build ATM term structure: expiry → ATM IV.
+    ATM = strike closest to spot.
+    """
+    if snapshot is None:
+        return pd.DataFrame()
+
+    spot = snapshot['spot']
+    records = []
+
+    for exp, rows in snapshot['expiries'].items():
+        df = pd.DataFrame(rows)
+        if df.empty or 'optionType' not in df.columns:
+            continue
+
+        calls = df[(df['optionType'] == 'Call') & (df['volatility'] > 0)]
+        if calls.empty:
+            continue
+
+        # Closest strike to spot
+        atm_idx = (calls['strikePrice'] - spot).abs().idxmin()
+        atm_row = calls.loc[atm_idx]
+
+        records.append({
+            'expiry': exp,
+            'atm_iv': atm_row['volatility'],
+            'strike': atm_row['strikePrice'],
+            'dte': atm_row.get('daysToExpiration', 0),
+        })
+
+    return pd.DataFrame(records)
+
+
+def build_skew(snapshot, expiry_idx=0, pct_range=0.10):
+    """
+    Build vol skew for a single expiry: strike → IV.
+    Uses OTM puts below spot, OTM calls above spot.
+    """
+    if snapshot is None:
+        return pd.DataFrame(), 0, ''
+
+    spot = snapshot['spot']
+    expiries = list(snapshot['expiries'].keys())
+
+    if expiry_idx >= len(expiries):
+        return pd.DataFrame(), spot, ''
+
+    exp = expiries[expiry_idx]
+    rows = snapshot['expiries'][exp]
+    df = pd.DataFrame(rows)
+
+    if df.empty or 'optionType' not in df.columns:
+        return pd.DataFrame(), spot, exp
+
+    min_s = spot * (1 - pct_range)
+    max_s = spot * (1 + pct_range)
+    df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
+    df = df[df['volatility'].notna() & (df['volatility'] > 0)]
+
+    puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot)]
+    calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot)]
+    otm = pd.concat([puts, calls]).sort_values('strikePrice')
+
+    return otm[['strikePrice', 'volatility']].reset_index(drop=True), spot, exp
+
+
+# ═══════════════════════════════════════
+# TvDatafeed — Price Data
+# ═══════════════════════════════════════
+
+def get_tv_connection(secrets=None):
+    """Get tvDatafeed connection. Uses st.secrets if available."""
+    try:
+        from tvDatafeed import TvDatafeed
+        if secrets and secrets.get('tv_username') and secrets.get('tv_password'):
+            return TvDatafeed(username=secrets['tv_username'], password=secrets['tv_password'])
+        return TvDatafeed()
+    except Exception as e:
+        print(f"tvDatafeed connection error: {e}")
+        return None
+
+
+def fetch_price_data(tv=None, n_bars=84, secrets=None):
+    """
+    Fetch SPX 5-min candles from TradingView (OANDA:SPX500USD).
+    7 hours × 12 bars/hour = 84 bars.
+    Returns DataFrame with Open, High, Low, Close columns, index in ET.
+    """
+    if tv is None:
+        tv = get_tv_connection(secrets)
+    if tv is None:
+        print("fetch_price_data: no tv connection")
+        return pd.DataFrame()
+
+    try:
+        from tvDatafeed import Interval
+        df = tv.get_hist(
+            symbol='SPX500USD',
+            exchange='OANDA',
+            interval=Interval.in_5_minute,
+            n_bars=n_bars,
+        )
+        print(f"fetch_price_data: got {type(df)}, empty={df is None or (hasattr(df, 'empty') and df.empty)}")
+        if df is not None and not df.empty:
+            df = df.rename(columns={
+                'open': 'Open', 'high': 'High',
+                'low': 'Low', 'close': 'Close', 'volume': 'Volume',
+            })
+            # Convert to ET
+            import pytz
+            et = pytz.timezone('US/Eastern')
+            if df.index.tz is None:
+                try:
+                    df.index = df.index.tz_localize('UTC')
+                except Exception:
+                    pass
             try:
-                current = load_live_snapshot()
-            except Exception as e:
-                print(f"Live fetch failed: {e}")
-                current = None
-        if current is not None:
-            save_snapshot(current)
-
-    # Fallback: use most recent available snapshot (weekends, holidays, errors)
-    if current is None:
-        snapshots = list_snapshots()
-        if snapshots:
-            current = load_snapshot(snapshots[0])  # newest available
-            if current:
-                print(f"Using most recent snapshot: {snapshots[0]}")
-
-    if current is None:
-        return None, None
-
-    current_date = current.get('date', today_str)
-
-    # Prior: find most recent snapshot before current
-    prior = get_prior_snapshot(current_date)
-
-    # If no prior exists, generate synthetic
-    if prior is None:
-        prior = generate_synthetic_prior(current)
-        if prior is not None:
-            prior['date'] = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-            save_snapshot(prior)
-
-    return current, prior
+                df.index = df.index.tz_convert(et)
+            except Exception:
+                pass
+            print(f"fetch_price_data: returning {len(df)} bars, cols={list(df.columns)}")
+            return df
+    except Exception as e:
+        print(f"fetch_price_data ERROR: {e}")
+    return pd.DataFrame()
 
 
-# ─────────────────────────────────────
-# Chart Builders
-# ─────────────────────────────────────
+def fetch_tv_spot(tv=None, secrets=None):
+    """Get current SPX spot price from TradingView."""
+    if tv is None:
+        tv = get_tv_connection(secrets)
+    if tv is None:
+        return None
 
-def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
+    try:
+        from tvDatafeed import Interval
+        df = tv.get_hist(
+            symbol='SPX500USD',
+            exchange='OANDA',
+            interval=Interval.in_1_minute,
+            n_bars=1,
+        )
+        if df is not None and not df.empty:
+            return float(df['close'].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+# ═══════════════════════════════════════
+# IV Change Aggregation (for combined chart)
+# ═══════════════════════════════════════
+
+def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05):
     """
-    Build the main vol surface table with changes.
-    Returns: surface_df, changes_df, spot
+    Compute per-strike IV changes between current live data and prior snapshot.
+
+    max_dte: 0 = today only (0DTE), 7 = next 7 days, etc.
+    Aggregation: average IV per strike across selected expiries, then diff.
+
+    Returns DataFrame with columns: strike, iv_now, iv_prior, iv_change
     """
-    surf_now, spot = build_vol_surface(current, strike_step=strike_step, pct_range=pct_range/100)
-    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
+    if current is None or prior is None:
+        return pd.DataFrame()
 
-    if surf_now.empty:
-        return pd.DataFrame(), pd.DataFrame(), 0
+    spot = current['spot']
+    min_strike = spot * (1 - pct_range)
+    max_strike = spot * (1 + pct_range)
 
-    # Align indices
-    common_strikes = surf_now.index.intersection(surf_prior.index) if not surf_prior.empty else surf_now.index
-    common_expiries = [c for c in surf_now.columns if c in surf_prior.columns] if not surf_prior.empty else []
+    today_str = datetime.now().strftime('%Y-%m-%d')
 
-    print(f"[VOL TABLE] now_cols={list(surf_now.columns)}, prior_cols={list(surf_prior.columns) if not surf_prior.empty else '[]'}")
-    print(f"[VOL TABLE] common_expiries={common_expiries}, common_strikes={len(common_strikes)}")
+    # Select expiries within DTE range
+    def select_expiries(snapshot, dte_days):
+        cutoff = (datetime.now() + timedelta(days=dte_days + 1)).strftime('%Y-%m-%d')
+        return [e for e in snapshot['expiries'].keys() if e <= cutoff]
 
-    changes = pd.DataFrame(index=common_strikes)
-    for exp in common_expiries:
-        changes[exp] = surf_now.loc[common_strikes, exp] - surf_prior.loc[common_strikes, exp]
+    if max_dte == 0:
+        # 0DTE: only today's expiry
+        current_expiries = [e for e in current['expiries'].keys() if e == today_str]
+        # Prior: use same date if exists, else first expiry
+        prior_expiries = [e for e in prior['expiries'].keys() if e == today_str]
+        if not prior_expiries:
+            # Fallback: use the first (nearest) expiry in prior
+            prior_expiries = list(prior['expiries'].keys())[:1]
+    else:
+        current_expiries = select_expiries(current, max_dte)
+        prior_expiries = select_expiries(prior, max_dte)
 
-    return surf_now, changes, spot
+    if not current_expiries or not prior_expiries:
+        # Fallback: use all available
+        current_expiries = list(current['expiries'].keys())[:max(1, max_dte // 2)]
+        prior_expiries = list(prior['expiries'].keys())[:max(1, max_dte // 2)]
 
-
-def create_surface_heatmap(surface_df, changes_df, spot):
-    """Create the combined vol surface + changes heatmap chart."""
-    if surface_df.empty:
-        return empty_fig("No surface data")
-
-    # Build display table matching screenshot layout
-    expiries = list(surface_df.columns)
-
-    strikes = surface_df.index.values
-    pct_spot = (strikes / spot * 100).round(2)
-
-    # Vol surface values (as percentages for display)
-    vol_text = []
-    vol_z = []
-    for strike in strikes:
-        row_text = []
-        row_z = []
+    def aggregate_iv(snapshot, expiries, min_s, max_s, step):
+        """Average IV per rounded strike across selected expiries, using OTM."""
+        all_rows = []
+        spot_val = snapshot['spot']
         for exp in expiries:
-            iv = surface_df.loc[strike, exp] if strike in surface_df.index and exp in surface_df.columns else np.nan
-            if pd.notna(iv):
-                row_text.append(f"{iv*100:.2f}")
-                row_z.append(iv * 100)
-            else:
-                row_text.append("")
-                row_z.append(np.nan)
-        vol_text.append(row_text)
-        vol_z.append(row_z)
-
-    fig = go.Figure(data=go.Heatmap(
-        z=vol_z,
-        x=[datetime.strptime(e, '%Y-%m-%d').strftime('%b %d') for e in expiries],  # MM-DD format
-        y=[f"{s:.0f}" for s in strikes],
-        text=vol_text,
-        texttemplate="%{text}" if len(strikes) <= 40 else "",
-        textfont=dict(size=9 if len(strikes) <= 30 else 7, color='white'),
-        colorscale=[
-            [0, '#1a237e'],
-            [0.3, '#283593'],
-            [0.5, '#3949ab'],
-            [0.7, '#e65100'],
-            [1.0, '#ff6d00'],
-        ],
-        colorbar=dict(
-            title=dict(text='IV %', font=dict(color=CS['text'], size=10)),
-            tickfont=dict(color=CS['text'], size=9),
-        ),
-        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{text}%<extra></extra>',
-    ))
-
-    # ATM line
-    atm_idx = np.argmin(np.abs(strikes - spot))
-    fig.add_hline(
-        y=atm_idx, line=dict(color=CS['gold'], width=2, dash='dash'),
-        annotation_text=f"ATM {spot:.0f}",
-        annotation_font=dict(color=CS['gold'], size=10),
-    )
-
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(text='VOL SURFACE', font=dict(color=CS['text'], size=13, family='Outfit')),
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=10, family='JetBrains Mono'),
-        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9), type='category'),
-        yaxis=dict(title='Strike', gridcolor=CS['grid'], tickfont=dict(size=9)),
-        margin=dict(l=60, r=20, t=40, b=40),
-        height=500,
-    )
-    return fig
-
-
-def create_changes_heatmap(changes_df, spot):
-    """Create vol changes heatmap (green = IV increase, red = decrease)."""
-    if changes_df.empty:
-        return empty_fig("No prior data for comparison")
-
-    strikes = changes_df.index.values
-    expiries = list(changes_df.columns)
-
-    z_vals = []
-    text_vals = []
-    for strike in strikes:
-        row_z = []
-        row_t = []
-        for exp in expiries:
-            val = changes_df.loc[strike, exp] if exp in changes_df.columns else np.nan
-            if pd.notna(val):
-                row_z.append(val * 100)  # Convert to percentage points
-                row_t.append(f"{val*100:+.2f}")
-            else:
-                row_z.append(np.nan)
-                row_t.append("")
-        z_vals.append(row_z)
-        text_vals.append(row_t)
-
-    fig = go.Figure(data=go.Heatmap(
-        z=z_vals,
-        x=[datetime.strptime(e, '%Y-%m-%d').strftime('%b %d') for e in expiries],
-        y=[f"{s:.0f}" for s in strikes],
-        text=text_vals,
-        texttemplate="%{text}" if len(strikes) <= 40 else "",
-        textfont=dict(size=9 if len(strikes) <= 30 else 7),
-        colorscale=[
-            [0, '#b71c1c'],
-            [0.35, '#e53935'],
-            [0.5, '#1a1a2e'],
-            [0.65, '#00c853'],
-            [1.0, '#1b5e20'],
-        ],
-        zmid=0,
-        colorbar=dict(
-            title=dict(text='Δ IV', font=dict(color=CS['text'], size=10)),
-            tickfont=dict(color=CS['text'], size=9),
-            ticksuffix='%',
-        ),
-        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>Change: %{text}%<extra></extra>',
-    ))
-
-    atm_idx = np.argmin(np.abs(strikes - spot))
-    fig.add_hline(
-        y=atm_idx, line=dict(color=CS['gold'], width=2, dash='dash'),
-        annotation_text=f"ATM {spot:.0f}",
-        annotation_font=dict(color=CS['gold'], size=10),
-    )
-
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(text='VOL CHANGES', font=dict(color=CS['text'], size=13, family='Outfit')),
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=10, family='JetBrains Mono'),
-        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickfont=dict(size=9), type='category'),
-        yaxis=dict(title='Strike', gridcolor=CS['grid'], tickfont=dict(size=9)),
-        margin=dict(l=60, r=20, t=40, b=40),
-        height=500,
-    )
-    return fig
-
-
-def create_3d_surface(surface_df, spot):
-    """Create 3D vol surface plot."""
-    if surface_df.empty:
-        return empty_fig("No surface data")
-
-    strikes = surface_df.index.values
-    expiries = list(surface_df.columns)
-    z_data = surface_df.values * 100  # Convert to percentage
-
-    # Expiry as numeric (days from now)
-    today = datetime.now()
-    exp_days = [(datetime.strptime(e, '%Y-%m-%d') - today).days for e in expiries]
-
-    fig = go.Figure(data=[go.Surface(
-        z=z_data,
-        x=exp_days,
-        y=strikes,
-        colorscale=[
-            [0, '#1a237e'],
-            [0.25, '#0d47a1'],
-            [0.5, '#ff8f00'],
-            [0.75, '#ff6d00'],
-            [1.0, '#e65100'],
-        ],
-        contours=dict(
-            z=dict(show=True, usecolormap=True, highlightcolor='white', project_z=True),
-        ),
-        hovertemplate='DTE: %{x}d<br>Strike: $%{y:.0f}<br>IV: %{z:.2f}%<extra></extra>',
-    )])
-
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(text='3D VOL SURFACE', font=dict(color=CS['text'], size=13, family='Outfit')),
-        paper_bgcolor=CS['bg'],
-        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
-        scene=dict(
-            xaxis=dict(title='DTE', backgroundcolor=CS['plot_bg'], gridcolor=CS['grid']),
-            yaxis=dict(title='Strike', backgroundcolor=CS['plot_bg'], gridcolor=CS['grid']),
-            zaxis=dict(title='IV %', backgroundcolor=CS['plot_bg'], gridcolor=CS['grid']),
-        ),
-        margin=dict(l=0, r=0, t=40, b=0),
-        height=450,
-    )
-    return fig
-
-
-def create_fixed_strike_changes(changes_df, spot, expiry_idx=0):
-    """Bar chart: IV changes per strike for a single expiry."""
-    if changes_df.empty or len(changes_df.columns) <= expiry_idx:
-        return empty_fig("No prior data for comparison")
-
-    exp = changes_df.columns[expiry_idx]
-    data = changes_df[exp].dropna() * 100  # to percentage points
-    strikes = data.index.values
-    values = data.values
-
-    colors = [CS['green'] if v >= 0 else CS['red'] for v in values]
-
-    fig = go.Figure(data=go.Bar(
-        x=[f"{s:.0f}" for s in strikes],
-        y=values,
-        marker_color=colors,
-        opacity=0.85,
-        hovertemplate='Strike: %{x}<br>Δ IV: %{y:+.2f}%<extra></extra>',
-    ))
-
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(
-            text=f'FIXED STRIKE VOL CHANGES — {exp}',
-            font=dict(color=CS['text'], size=13, family='Outfit'),
-        ),
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
-        xaxis=dict(title='Strike', gridcolor=CS['grid'], tickangle=-45, tickfont=dict(size=8)),
-        yaxis=dict(title='IV Change (%)', gridcolor=CS['grid'], zeroline=True,
-                   zerolinecolor=CS['text'], zerolinewidth=0.5),
-        margin=dict(l=50, r=20, t=40, b=60),
-        height=350,
-    )
-    return fig
-
-
-def create_skew_chart(current, prior, expiry_idx=0):
-    """Front month vol skew: IV vs Strike, current + prior + change bars."""
-    skew_now, spot, exp = build_skew(current, expiry_idx=expiry_idx)
-    skew_prior, _, exp_prior = build_skew(prior, expiry_idx=expiry_idx)
-
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    if not skew_now.empty:
-        fig.add_trace(go.Scatter(
-            x=skew_now['strikePrice'],
-            y=skew_now['volatility'] * 100,
-            mode='lines',
-            name='Current',
-            line=dict(color=CS['gold'], width=2.5),
-        ), secondary_y=False)
-
-    if not skew_prior.empty:
-        fig.add_trace(go.Scatter(
-            x=skew_prior['strikePrice'],
-            y=skew_prior['volatility'] * 100,
-            mode='lines',
-            name='Prior',
-            line=dict(color='#555577', width=1.5, dash='dot'),
-        ), secondary_y=False)
-
-    # Vol change bars (if both exist)
-    if not skew_now.empty and not skew_prior.empty:
-        merged = pd.merge(
-            skew_now.rename(columns={'volatility': 'iv_now'}),
-            skew_prior.rename(columns={'volatility': 'iv_prior'}),
-            on='strikePrice', how='inner',
-        )
-        merged['change'] = (merged['iv_now'] - merged['iv_prior']) * 100
-        colors = [CS['green'] if v >= 0 else CS['red'] for v in merged['change']]
-
-        fig.add_trace(go.Bar(
-            x=merged['strikePrice'],
-            y=merged['change'],
-            name='Vol Change',
-            marker_color=colors,
-            opacity=0.5,
-        ), secondary_y=True)
-
-    # Spot line
-    if spot:
-        fig.add_vline(x=spot, line=dict(color=CS['cyan'], width=1, dash='dash'))
-
-    exp_label = exp if exp else ''
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(
-            text=f'FRONT MONTH VOL SKEW — {exp_label}',
-            font=dict(color=CS['text'], size=13, family='Outfit'),
-        ),
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
-        xaxis=dict(title='Strike', gridcolor=CS['grid']),
-        margin=dict(l=50, r=50, t=40, b=40),
-        height=380,
-        legend=dict(orientation='h', y=-0.15, font=dict(size=9)),
-        showlegend=True,
-    )
-    fig.update_yaxes(title_text='IV %', gridcolor=CS['grid'], secondary_y=False)
-    fig.update_yaxes(title_text='Δ IV %', gridcolor=CS['grid'], secondary_y=True,
-                     zeroline=True, zerolinecolor=CS['text'])
-
-    return fig
-
-
-def create_term_structure(current, prior):
-    """Term structure: ATM IV vs expiry date, current + prior."""
-    ts_now = build_term_structure(current)
-    ts_prior = build_term_structure(prior)
-
-    fig = go.Figure()
-
-    if not ts_now.empty:
-        fig.add_trace(go.Scatter(
-            x=ts_now['expiry'],
-            y=ts_now['atm_iv'] * 100,
-            mode='lines+markers',
-            name='Current',
-            line=dict(color=CS['gold'], width=2.5),
-            marker=dict(size=6, color=CS['gold']),
-        ))
-
-    if not ts_prior.empty:
-        fig.add_trace(go.Scatter(
-            x=ts_prior['expiry'],
-            y=ts_prior['atm_iv'] * 100,
-            mode='lines+markers',
-            name='Prior',
-            line=dict(color='#555577', width=1.5, dash='dot'),
-            marker=dict(size=5, color='#555577'),
-        ))
-
-    fig.update_layout(
-        template='plotly_dark',
-        title=dict(text='TERM STRUCTURE', font=dict(color=CS['text'], size=13, family='Outfit')),
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
-        xaxis=dict(title='Expiry', gridcolor=CS['grid'], tickangle=-30, tickfont=dict(size=9)),
-        yaxis=dict(title='ATM IV %', gridcolor=CS['grid']),
-        margin=dict(l=50, r=20, t=40, b=60),
-        height=380,
-        legend=dict(orientation='h', y=-0.2, font=dict(size=9)),
-    )
-    return fig
-
-
-def create_combined_price_iv_chart(price_df, iv_changes_df, spot):
-    """
-    Combined chart: candles (left ~80%) + IV change bars (right ~20%).
-    Shared Y-axis = price/strike.
-    Candles: dodger blue up, magenta down.
-    IV bars: green = IV increase, red = IV decrease.
-    """
-    fig = make_subplots(
-        rows=1, cols=2,
-        column_widths=[0.8, 0.2],
-        shared_yaxes=True,
-        horizontal_spacing=0.01,
-    )
-
-    # ── Candles ──
-    if not price_df.empty:
-        time_labels = [t.strftime('%H:%M') for t in price_df.index]
-
-        fig.add_trace(go.Candlestick(
-            x=time_labels,
-            open=price_df['Open'], high=price_df['High'],
-            low=price_df['Low'], close=price_df['Close'],
-            increasing=dict(line=dict(color='dodgerblue'), fillcolor='dodgerblue'),
-            decreasing=dict(line=dict(color='magenta'), fillcolor='magenta'),
-            name='SPX',
-            showlegend=False,
-        ), row=1, col=1)
-
-        # Spot line
-        if spot:
-            fig.add_hline(
-                y=spot, line=dict(color=CS['cyan'], width=1, dash='dot'),
-                annotation_text=f"${spot:,.0f}",
-                annotation_font=dict(color=CS['cyan'], size=9),
-                annotation_position='left',
-                row=1, col=1,
-            )
-    else:
-        fig.add_annotation(
-            text="No price data (tvdatafeed unavailable)",
-            xref="paper", yref="paper", x=0.3, y=0.5,
-            showarrow=False, font=dict(color=CS['text'], size=13),
-        )
-
-    # ── IV Change Bars ──
-    if not iv_changes_df.empty:
-        strikes = iv_changes_df['strike'].values
-        changes = iv_changes_df['iv_change'].values
-        colors = [CS['green'] if v >= 0 else CS['red'] for v in changes]
-
-        fig.add_trace(go.Bar(
-            x=changes,
-            y=strikes,
-            orientation='h',
-            marker_color=colors,
-            opacity=0.8,
-            name='Δ IV',
-            showlegend=False,
-            hovertemplate='Strike: $%{y:,.0f}<br>Δ IV: %{x:+.2f}%<extra></extra>',
-        ), row=1, col=2)
-
-    # ── Layout ──
-    # Y-axis range: use price data range with some padding
-    if not price_df.empty:
-        y_min = min(price_df['Low'].min(), iv_changes_df['strike'].min() if not iv_changes_df.empty else price_df['Low'].min())
-        y_max = max(price_df['High'].max(), iv_changes_df['strike'].max() if not iv_changes_df.empty else price_df['High'].max())
-        y_pad = (y_max - y_min) * 0.05
-    elif not iv_changes_df.empty:
-        y_min = iv_changes_df['strike'].min()
-        y_max = iv_changes_df['strike'].max()
-        y_pad = (y_max - y_min) * 0.05
-    else:
-        y_min, y_max, y_pad = 6800, 7000, 10
-
-    fig.update_layout(
-        template='plotly_dark',
-        paper_bgcolor=CS['bg'],
-        plot_bgcolor=CS['plot_bg'],
-        font=dict(color=CS['text'], size=9, family='JetBrains Mono'),
-        height=500,
-        margin=dict(l=60, r=20, t=10, b=40),
-        showlegend=False,
-        yaxis=dict(
-            range=[y_min - y_pad, y_max + y_pad],
-            gridcolor=CS['grid'],
-            tickformat='$,.0f',
-            title='',
-        ),
-        # Candle x-axis
-        xaxis=dict(
-            gridcolor=CS['grid'],
-            type='category',
-            rangeslider_visible=False,
-            title='Time (ET)',
-            tickfont=dict(size=8),
-            nticks=14,
-        ),
-        # IV bars x-axis
-        xaxis2=dict(
-            gridcolor=CS['grid'],
-            zeroline=True,
-            zerolinecolor=CS['text'],
-            zerolinewidth=0.5,
-            title='Δ IV %',
-            tickfont=dict(size=8),
-        ),
-        yaxis2=dict(
-            gridcolor=CS['grid'],
-            showticklabels=False,
-        ),
-    )
-
-    return fig
-
-
-# ─────────────────────────────────────
-# MAIN APP
-# ─────────────────────────────────────
-
-current, prior = ensure_data()
-
-if current is None:
-    st.error("❌ Failed to fetch data. Check your network and try again.")
-    st.stop()
-
-# ── Diagnostic: print snapshot structure ──
-cur_exps = list(current.get('expiries', {}).keys())
-prior_exps = list(prior.get('expiries', {}).keys()) if prior else []
-print(f"[DIAG] current date={current.get('date')}, spot={current.get('spot')}, expiries={cur_exps}")
-print(f"[DIAG] prior date={prior.get('date') if prior else 'None'}, spot={prior.get('spot') if prior else 'None'}, expiries={prior_exps}")
-print(f"[DIAG] expiry overlap={[e for e in cur_exps if e in prior_exps]}")
-
-# ── tvdatafeed connection (cached across reruns) ──
-@st.cache_resource(show_spinner=False)
-def _get_cached_tv():
-    """Singleton tvdatafeed connection."""
-    return get_tv_connection()
-
-try:
-    tv_secrets = dict(st.secrets) if st.secrets else {}
-except Exception:
-    tv_secrets = {}
-tv = _get_cached_tv()
-
-# ── Spot price from tvdatafeed (live) with fallback to snapshot ──
-tv_spot = fetch_tv_spot(tv, tv_secrets)
-spot = tv_spot if tv_spot else current['spot']
-prior_spot = prior['spot'] if prior else spot
-spot_change_pct = (spot / prior_spot - 1) * 100 if prior_spot else 0
-
-# ── Title Bar ──
-change_class = "spot-change-up" if spot_change_pct >= 0 else "spot-change-down"
-current_date = current.get('date', 'N/A')
-prior_date = prior.get('date', 'N/A') if prior else 'N/A'
-
-# Get ET timestamp
-est = pytz.timezone('US/Eastern')
-now_et = datetime.now(est)
-
-st.markdown(f"""
-<div class="title-bar">
-    <div>
-        <span class="title-main">SPX VOLATILITY SURFACE CHANGES</span><br>
-        <span class="title-sub">
-            <span class="date-badge date-current">CURRENT: {current_date}</span>
-            <span class="date-badge date-prior">PRIOR: {prior_date}</span>
-            &nbsp;&nbsp;{now_et.strftime('%H:%M ET')}
-        </span>
-    </div>
-    <div>
-        <span class="spot-badge">
-            SPOT &nbsp; ${spot:,.2f} &nbsp;
-            <span class="{change_class}">{spot_change_pct:+.2f}%</span>
-        </span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Controls ──
-ctrl_cols = st.columns([1, 1, 1, 1, 1])
-with ctrl_cols[0]:
-    strike_step = st.selectbox("Strike Step", [5, 10], index=0, key="sstep2")
-with ctrl_cols[1]:
-    pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=1, key="pctrange2")
-with ctrl_cols[2]:
-    dte_mode = st.selectbox("DTE", [0, 1, 3, 7, 14, 30], format_func=lambda x: "0DTE" if x == 0 else f"{x}d", index=0, key="dtemode")
-with ctrl_cols[3]:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 Refresh"):
-        load_live_snapshot.clear()
-        st.rerun()
-
-# ── Combined Price + IV Chart (top of page, full width) ──
-st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-st.markdown('<div class="chart-title">SPX PRICE &amp; IV CHANGES</div>', unsafe_allow_html=True)
-
-price_df = fetch_price_data(tv, n_bars=84, secrets=tv_secrets)
-iv_changes = compute_iv_changes(current, prior, max_dte=dte_mode, strike_step=strike_step, pct_range=pct_range/100)
-fig_combined = create_combined_price_iv_chart(price_df, iv_changes, spot)
-st.plotly_chart(fig_combined, width="stretch", theme=None, key="combined")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Build data ──
-surface_df, changes_df, _ = create_vol_surface_table(current, prior, strike_step=strike_step, pct_range=pct_range)
-
-# ── Row 1: Vol Surface + Changes Heatmaps ──
-st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-row1_l, row1_r = st.columns(2)
-
-with row1_l:
-    st.markdown('<div class="chart-title">VOL SURFACE</div>', unsafe_allow_html=True)
-    fig_surface = create_surface_heatmap(surface_df, changes_df, spot)
-    st.plotly_chart(fig_surface, width="stretch", theme=None, key="surface")
-
-with row1_r:
-    st.markdown('<div class="chart-title">VOL CHANGES</div>', unsafe_allow_html=True)
-    fig_changes = create_changes_heatmap(changes_df, spot)
-    st.plotly_chart(fig_changes, width="stretch", theme=None, key="changes")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Row 2: 3D Surface + Fixed Strike Changes ──
-st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-row2_l, row2_r = st.columns(2)
-
-with row2_l:
-    fig_3d = create_3d_surface(surface_df, spot)
-    st.plotly_chart(fig_3d, width="stretch", theme=None, key="surface3d")
-
-with row2_r:
-    # Expiry selector for fixed-strike changes
-    exp_options = list(changes_df.columns) if not changes_df.empty else []
-    if exp_options:
-        selected_exp_idx = st.selectbox(
-            "Expiry for Fixed Strike",
-            range(len(exp_options)),
-            format_func=lambda i: exp_options[i],
-            key="fsc_exp",
-        )
-        fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx)
-    else:
-        fig_fsc = empty_fig("No prior data for comparison")
-    st.plotly_chart(fig_fsc, width="stretch", theme=None, key="fixedstrike")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Row 3: Skew + Term Structure ──
-st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-row3_l, row3_r = st.columns(2)
-
-with row3_l:
-    fig_skew = create_skew_chart(current, prior, expiry_idx=0)
-    st.plotly_chart(fig_skew, width="stretch", theme=None, key="skew")
-
-with row3_r:
-    fig_term = create_term_structure(current, prior)
-    st.plotly_chart(fig_term, width="stretch", theme=None, key="termstruct")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Raw Data Table (collapsible) ──
-with st.expander("📊 Raw Vol Surface Data"):
-    if not surface_df.empty:
-        display = surface_df.copy()
-        display.index = [f"${s:,.0f}" for s in display.index]
-        display = display.map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
-        st.dataframe(display, width="stretch", height=400)
-
-with st.expander("📊 Vol Changes Data"):
-    if not changes_df.empty:
-        display = changes_df.copy()
-        display.index = [f"${s:,.0f}" for s in display.index]
-        display = display.map(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "")
-        st.dataframe(display, width="stretch", height=400)
-
-# ── Footer ──
-snapshot_dates = list_snapshots()
-st.caption(f"Snapshots on disk: {', '.join(snapshot_dates) if snapshot_dates else 'none'} | "
-           f"Expiries loaded: {len(current.get('expiries', {}))} | "
-           f"Data source: Barchart")
+            if exp not in snapshot['expiries']:
+                continue
+            df = pd.DataFrame(snapshot['expiries'][exp])
+            if df.empty or 'optionType' not in df.columns:
+                continue
+            df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
+            df = df[df['volatility'].notna() & (df['volatility'] > 0)]
+            # OTM: puts below spot, calls at/above
+            puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot_val)]
+            calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot_val)]
+            otm = pd.concat([puts, calls])
+            all_rows.append(otm)
+
+        if not all_rows:
+            return pd.Series(dtype=float)
+
+        combined = pd.concat(all_rows)
+        combined['strike_rounded'] = (combined['strikePrice'] / step).round() * step
+        return combined.groupby('strike_rounded')['volatility'].mean()
+
+    iv_now = aggregate_iv(current, current_expiries, min_strike, max_strike, strike_step)
+    iv_prior = aggregate_iv(prior, prior_expiries, min_strike, max_strike, strike_step)
+
+    if iv_now.empty or iv_prior.empty:
+        return pd.DataFrame()
+
+    # Align on common strikes
+    common = iv_now.index.intersection(iv_prior.index)
+    if len(common) == 0:
+        return pd.DataFrame()
+
+    result = pd.DataFrame({
+        'strike': common,
+        'iv_now': iv_now.loc[common].values,
+        'iv_prior': iv_prior.loc[common].values,
+    })
+    result['iv_change'] = (result['iv_now'] - result['iv_prior']) * 100  # Vol points
+    result = result.sort_values('strike').reset_index(drop=True)
+
+    return result
