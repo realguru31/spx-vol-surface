@@ -173,7 +173,7 @@ CS = {
 # ─────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def load_live_snapshot():
-    """Fetch live data from Barchart. Cached 5 min."""
+    """Fetch live data. Cached 5 min."""
     return fetch_full_snapshot(num_expiries=8)
 
 
@@ -188,7 +188,7 @@ def ensure_data():
     # Try loading today's saved snapshot first
     current = load_snapshot(today_str)
     if current is None:
-        with st.spinner("Fetching live data from Barchart..."):
+        with st.spinner("Fetching live data ..."):
             try:
                 current = load_live_snapshot()
             except Exception as e:
@@ -233,7 +233,7 @@ def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
     Returns: surface_df, changes_df, spot
     """
     surf_now, spot = build_vol_surface(current, strike_step=strike_step, pct_range=pct_range/100)
-    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100)
+    surf_prior, _ = build_vol_surface(prior, strike_step=strike_step, pct_range=pct_range/100, otm_spot=spot)
 
     if surf_now.empty:
         return pd.DataFrame(), pd.DataFrame(), 0
