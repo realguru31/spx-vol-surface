@@ -540,10 +540,10 @@ def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05)
         current_expiries = list(current['expiries'].keys())[:max(1, max_dte // 2)]
         prior_expiries = list(prior['expiries'].keys())[:max(1, max_dte // 2)]
 
-    def aggregate_iv(snapshot, expiries, min_s, max_s, step):
-        """Average IV per rounded strike across selected expiries, using OTM."""
+    def aggregate_iv(snapshot, expiries, min_s, max_s, step, otm_spot):
+        """Average IV per rounded strike across selected expiries, using OTM.
+        otm_spot: use consistent spot for OTM split across both snapshots."""
         all_rows = []
-        spot_val = snapshot['spot']
         for exp in expiries:
             if exp not in snapshot['expiries']:
                 continue
@@ -552,9 +552,9 @@ def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05)
                 continue
             df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
             df = df[df['volatility'].notna() & (df['volatility'] > 0)]
-            # OTM: puts below spot, calls at/above
-            puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot_val)]
-            calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot_val)]
+            # OTM: puts below spot, calls at/above — use consistent split point
+            puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < otm_spot)]
+            calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= otm_spot)]
             otm = pd.concat([puts, calls])
             all_rows.append(otm)
 
@@ -565,8 +565,8 @@ def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05)
         combined['strike_rounded'] = (combined['strikePrice'] / step).round() * step
         return combined.groupby('strike_rounded')['volatility'].mean()
 
-    iv_now = aggregate_iv(current, current_expiries, min_strike, max_strike, strike_step)
-    iv_prior = aggregate_iv(prior, prior_expiries, min_strike, max_strike, strike_step)
+    iv_now = aggregate_iv(current, current_expiries, min_strike, max_strike, strike_step, spot)
+    iv_prior = aggregate_iv(prior, prior_expiries, min_strike, max_strike, strike_step, spot)
 
     if iv_now.empty or iv_prior.empty:
         return pd.DataFrame()
