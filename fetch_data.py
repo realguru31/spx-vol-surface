@@ -286,20 +286,22 @@ def generate_synthetic_prior(today_snapshot):
 # Vol Surface Builder
 # ═══════════════════════════════════════
 
-def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
+def build_vol_surface(snapshot, strike_step=50, pct_range=0.12, otm_spot=None):
     """
     Build vol surface DataFrame from snapshot.
     Rows = strikes, Columns = expiry dates, Values = IV (decimal).
     Uses OTM options: puts below spot, calls at/above spot.
+    otm_spot: if provided, use as put/call split point for consistent comparison.
     """
     if snapshot is None:
         return pd.DataFrame(), 0
 
     spot = snapshot['spot']
+    split_spot = otm_spot if otm_spot is not None else spot
     min_strike = spot * (1 - pct_range)
     max_strike = spot * (1 + pct_range)
 
-    print(f"[BUILD_SURF] spot={spot}, range={pct_range}, strikes={min_strike:.0f}-{max_strike:.0f}, step={strike_step}")
+    print(f"[BUILD_SURF] spot={spot}, otm_split={split_spot:.1f}, range={pct_range}, strikes={min_strike:.0f}-{max_strike:.0f}, step={strike_step}")
 
     surface = {}
 
@@ -320,9 +322,9 @@ def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
         # Filter out zero/null volatility
         df = df[df['volatility'].notna() & (df['volatility'] > 0)]
 
-        # Use OTM: puts below spot, calls at/above
-        puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot)]
-        calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot)]
+        # Use OTM: puts below split_spot, calls at/above
+        puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < split_spot)]
+        calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= split_spot)]
         otm = pd.concat([puts, calls])
 
         # Round strikes to step
