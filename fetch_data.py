@@ -65,13 +65,19 @@ def fetch_chain(session, xsrf, referer, expiry_date):
         # Handle grouped response (dict with Call/Put keys)
         if isinstance(raw_data, dict):
             all_rows = []
-            for group_rows in raw_data.values():
+            for group_key, group_rows in raw_data.items():
                 if isinstance(group_rows, list):
                     for row in group_rows:
                         if isinstance(row, dict) and 'raw' in row:
-                            all_rows.append(row['raw'])
+                            entry = row['raw']
                         elif isinstance(row, dict):
-                            all_rows.append(row)
+                            entry = row
+                        else:
+                            continue
+                        # Ensure optionType is set from the group key
+                        if 'optionType' not in entry and group_key in ('Call', 'Put'):
+                            entry['optionType'] = group_key
+                        all_rows.append(entry)
             return all_rows
 
         # Handle flat list response
@@ -95,18 +101,18 @@ def fetch_chain(session, xsrf, referer, expiry_date):
 
 def fetch_expiry_dates_from_barchart():
     """Get available SPX option expiry dates.
-    SPX has Mon/Wed/Fri weekly expirations plus monthly (3rd Friday).
-    Generate known schedule + scrape Barchart page for extra dates.
+    SPX has DAILY 0DTE expirations (every business day).
+    Generate all weekdays + scrape Barchart page for extra dates.
     """
     import re
     today = datetime.now()
     today_str = today.strftime('%Y-%m-%d')
 
-    # Generate SPX expiry dates: Mon(0), Wed(2), Fri(4) for next 60 days
+    # Generate SPX expiry dates: every weekday for next 60 days
     generated = []
     for i in range(60):
         d = today + timedelta(days=i)
-        if d.weekday() in (0, 2, 4):  # Mon, Wed, Fri
+        if d.weekday() < 5:  # Mon-Fri
             generated.append(d.strftime('%Y-%m-%d'))
 
     # Also try scraping Barchart page for any additional dates
@@ -303,8 +309,16 @@ def build_vol_surface(snapshot, strike_step=50, pct_range=0.12):
             print(f"[BUILD_SURF] {exp}: empty or no strikePrice column")
             continue
 
+        # Guard: skip expiry if optionType is missing
+        if 'optionType' not in df.columns:
+            print(f"[BUILD_SURF] {exp}: no optionType column, skipping")
+            continue
+
         # Filter to range
         df = df[(df['strikePrice'] >= min_strike) & (df['strikePrice'] <= max_strike)]
+
+        # Filter out zero/null volatility
+        df = df[df['volatility'].notna() & (df['volatility'] > 0)]
 
         # Use OTM: puts below spot, calls at/above
         puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot)]
@@ -345,10 +359,10 @@ def build_term_structure(snapshot):
 
     for exp, rows in snapshot['expiries'].items():
         df = pd.DataFrame(rows)
-        if df.empty:
+        if df.empty or 'optionType' not in df.columns:
             continue
 
-        calls = df[df['optionType'] == 'Call']
+        calls = df[(df['optionType'] == 'Call') & (df['volatility'] > 0)]
         if calls.empty:
             continue
 
@@ -384,12 +398,13 @@ def build_skew(snapshot, expiry_idx=0, pct_range=0.10):
     rows = snapshot['expiries'][exp]
     df = pd.DataFrame(rows)
 
-    if df.empty:
+    if df.empty or 'optionType' not in df.columns:
         return pd.DataFrame(), spot, exp
 
     min_s = spot * (1 - pct_range)
     max_s = spot * (1 + pct_range)
     df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
+    df = df[df['volatility'].notna() & (df['volatility'] > 0)]
 
     puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot)]
     calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot)]
@@ -533,9 +548,10 @@ def compute_iv_changes(current, prior, max_dte=0, strike_step=5, pct_range=0.05)
             if exp not in snapshot['expiries']:
                 continue
             df = pd.DataFrame(snapshot['expiries'][exp])
-            if df.empty:
+            if df.empty or 'optionType' not in df.columns:
                 continue
             df = df[(df['strikePrice'] >= min_s) & (df['strikePrice'] <= max_s)]
+            df = df[df['volatility'].notna() & (df['volatility'] > 0)]
             # OTM: puts below spot, calls at/above
             puts = df[(df['optionType'] == 'Put') & (df['strikePrice'] < spot_val)]
             calls = df[(df['optionType'] == 'Call') & (df['strikePrice'] >= spot_val)]
