@@ -173,7 +173,7 @@ CS = {
 # ─────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def load_live_snapshot():
-    """Fetch live data. Cached 5 min."""
+    """Fetch live data from Barchart. Cached 5 min."""
     return fetch_full_snapshot(num_expiries=8)
 
 
@@ -227,7 +227,7 @@ def ensure_data():
 # Chart Builders
 # ─────────────────────────────────────
 
-def create_vol_surface_table(current, prior, strike_step=5, pct_range=3):
+def create_vol_surface_table(current, prior, strike_step=10, pct_range=12):
     """
     Build the main vol surface table with changes.
     Returns: surface_df, changes_df, spot
@@ -438,7 +438,7 @@ def create_3d_surface(surface_df, spot):
 
 
 def create_fixed_strike_changes(changes_df, spot, expiry_idx=0):
-    """ IV changes per strike for a single expiry."""
+    """Bar chart: IV changes per strike for a single expiry."""
     if changes_df.empty or len(changes_df.columns) <= expiry_idx:
         return empty_fig("No prior data for comparison")
 
@@ -768,9 +768,9 @@ st.markdown(f"""
 # ── Controls ──
 ctrl_cols = st.columns([1, 1, 1, 1, 1])
 with ctrl_cols[0]:
-    strike_step = st.selectbox("Strike Step", [5, 10], index=1, key="sstep")
+    strike_step = st.selectbox("Strike Step", [5, 10], index=0, key="sstep2")
 with ctrl_cols[1]:
-    pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=5, key="pctrange")
+    pct_range = st.selectbox("Range %", [2, 3, 5, 8, 10, 12, 15], index=1, key="pctrange2")
 with ctrl_cols[2]:
     dte_mode = st.selectbox("DTE", [0, 1, 3, 7, 14, 30], format_func=lambda x: "0DTE" if x == 0 else f"{x}d", index=0, key="dtemode")
 with ctrl_cols[3]:
