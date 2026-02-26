@@ -173,7 +173,7 @@ CS = {
 # ─────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def load_live_snapshot():
-    """Fetch live data from Barchart. Cached 5 min."""
+    """Fetch live data Cached 5 min."""
     return fetch_full_snapshot(num_expiries=8)
 
 
@@ -188,7 +188,7 @@ def ensure_data():
     # Try loading today's saved snapshot first
     current = load_snapshot(today_str)
     if current is None:
-        with st.spinner("Fetching live data from Barchart..."):
+        with st.spinner("Fetching live data ..."):
             try:
                 current = load_live_snapshot()
             except Exception as e:
