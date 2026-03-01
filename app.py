@@ -437,7 +437,7 @@ def create_3d_surface(surface_df, spot):
     return fig
 
 
-def create_fixed_strike_changes(changes_df, spot, expiry_idx=0):
+def create_fixed_strike_changes(changes_df, spot, expiry_idx=0, strike_step=5):
     """Bar chart: IV changes per strike for a single expiry."""
     if changes_df.empty or len(changes_df.columns) <= expiry_idx:
         return empty_fig("No prior data for comparison")
@@ -448,14 +448,26 @@ def create_fixed_strike_changes(changes_df, spot, expiry_idx=0):
     values = data.values
 
     colors = [CS['green'] if v >= 0 else CS['red'] for v in values]
+    strike_labels = [f"{s:.0f}" for s in strikes]
 
     fig = go.Figure(data=go.Bar(
-        x=[f"{s:.0f}" for s in strikes],
+        x=strike_labels,
         y=values,
         marker_color=colors,
         opacity=0.85,
         hovertemplate='Strike: %{x}<br>Δ IV: %{y:+.2f}%<extra></extra>',
     ))
+
+    # ATM vertical line
+    atm_label = f"{round(spot / strike_step) * strike_step:.0f}"
+    if atm_label in strike_labels:
+        fig.add_vline(
+            x=atm_label,
+            line=dict(color=CS['cyan'], width=1.5, dash='dash'),
+            annotation_text=f"ATM {atm_label}",
+            annotation_font=dict(color=CS['cyan'], size=9),
+            annotation_position="top",
+        )
 
     fig.update_layout(
         template='plotly_dark',
@@ -827,7 +839,7 @@ with row2_r:
             format_func=lambda i: exp_options[i],
             key="fsc_exp",
         )
-        fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx)
+        fig_fsc = create_fixed_strike_changes(changes_df, spot, expiry_idx=selected_exp_idx, strike_step=strike_step)
     else:
         fig_fsc = empty_fig("No prior data for comparison")
     st.plotly_chart(fig_fsc, width="stretch", theme=None, key="fixedstrike")
