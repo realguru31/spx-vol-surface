@@ -461,12 +461,16 @@ def create_fixed_strike_changes(changes_df, spot, expiry_idx=0, strike_step=5):
     # ATM vertical line
     atm_label = f"{round(spot / strike_step) * strike_step:.0f}"
     if atm_label in strike_labels:
-        fig.add_vline(
-            x=atm_label,
+        fig.add_shape(
+            type="line", x0=atm_label, x1=atm_label,
+            y0=0, y1=1, yref="paper",
             line=dict(color=CS['cyan'], width=1.5, dash='dash'),
-            annotation_text=f"ATM {atm_label}",
-            annotation_font=dict(color=CS['cyan'], size=9),
-            annotation_position="top",
+        )
+        fig.add_annotation(
+            x=atm_label, y=1, yref="paper",
+            text=f"ATM {atm_label}", showarrow=False,
+            font=dict(color=CS['cyan'], size=9),
+            yshift=10,
         )
 
     fig.update_layout(
